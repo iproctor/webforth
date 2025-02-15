@@ -44,5 +44,21 @@ async function test() {
     const {memory: m, exports: e} = await runForth(': x 1 + ; 2 x')
     t.equal(popInt(m), 3, 'Did addition')
   }
+  {
+    const {memory: m, exports: e} = await runForth('3 1 1 = if 2 * then')
+    t.equal(popInt(m), 6, 'True condition for if')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('3 1 2 = if 2 * then')
+    t.equal(popInt(m), 3, 'False condition for if')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('3 1 1 = if 2 * else 3 * then')
+    t.equal(popInt(m), 6, 'True condition for if/else')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('3 1 2 = if 2 * else 3 * then')
+    t.equal(popInt(m), 9, 'False condition for if/else')
+  }
 }
 test()

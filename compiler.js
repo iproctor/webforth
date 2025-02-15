@@ -62,7 +62,9 @@ const i32 = {
 }
 const wasm = {
   call: idx => [0x10, ...leb128(idx)],
-
+  ifEmpty: [0x04, 0x40], // if with empty block
+  else: [0x05],
+  endBlock: [0x0b],
 }
 
 const VAR_START = 1024
@@ -210,6 +212,13 @@ const prims = {
   // ( a b -- a b a )
   over: pushSp(nth(2)),
 
+  if: [
+    ...nth(1),
+    ...drop(1),
+    ...wasm.ifEmpty,
+  ],
+  else: wasm.else,
+  then: wasm.endBlock,
 }
 
 function buildBinaryModule(funcs) {
@@ -283,7 +292,6 @@ function buildBinaryModule(funcs) {
     ])
   ])
   for (const sec of sections) {
-    console.log('sec size', sec.length - 2)
     const count = leb128(sec.length - 2)
     sec.splice(1, 1, ...count)
   }
@@ -299,12 +307,6 @@ function buildBinaryModule(funcs) {
 async function compileDefs(defs, mem) {
   const funcs = {}
   let i = 0
-  for (const [name, code] of Object.entries(prims)) {
-    funcs[name] = {
-      i: i++,
-      code
-    }
-  }
   for (const [name, def] of Object.entries(defs)) {
     if (!def.words) continue
 
@@ -324,8 +326,7 @@ async function compileDefs(defs, mem) {
             const n = varAddr(wordDef.variable)
             code.push(...pushSp(i32.const(n)))
           } else {
-            console.log('calling?')
-            code.push(...wasm.call(wordDef.i))
+            code.push(...wasm.call(funcs[word].i))
           }
         }
       }
@@ -336,7 +337,6 @@ async function compileDefs(defs, mem) {
     }
   }
   const binary = buildBinaryModule(funcs)
-  console.log(binary)
   fs.writeFileSync('mod.wasm', binary)
   const imports = { js: { mem } };
   return await WebAssembly.instantiate(binary, imports);
@@ -361,12 +361,21 @@ function popInt(memory) {
   return val
 }
 
+const definitionKeyword = {
+  ':': true,
+  'variable': true,
+  'constant': true
+}
+
 // Turn forth source into webassembly wat
 async function runForth(source) {
   const tokens = source.split(/\s+/)
   const defs = {}
   let curDef
+  let doesDef
   let lastDef
+  let topLevelId = 0
+  let doesId = 0
   let wasmInstance
   const memory = new WebAssembly.Memory({
     initial: 100,
@@ -379,15 +388,43 @@ async function runForth(source) {
     if (!tok) {
       continue
     }
+    if (definitionKeyword[tok] && curDef?.topLevel) {
+      wasmInstance = await compileDefs(defs, memory)
+      wasmInstance.instance.exports[curDef.name]()
+      curDef = null
+    }
     if (tok === ':') {
+      if (curDef) {
+        throw new Error('cant start definition inside definition')
+      }
       const name = tokens[++i];
       curDef = defs[name] = {
+        name,
         words: [],
         immediate: false
       }
+    } else if (tok === 'does>') {
+      if (doesDef) {
+        throw new Error('Repeated does>')
+      }
+      const name = ` _does${doesId}`
+      doesDef = defs[name] = {
+        name,
+        words: [],
+        doesId
+      }
+      doesId++
     } else if (tok === ';') {
-      if (!curDef) {
+      if (!doesDef && (!curDef || curDef.topLevel)) {
         throw new Error('unexpected ;')
+      }
+      if (doesDef) {
+        // Gonna assume we are following a CREATE
+        curDef.words.push(
+          doesDef.doesId,
+          ' _attach_does'
+        )
+        doesDef = null
       }
       lastDef = curDef
       curDef = null
@@ -402,37 +439,47 @@ async function runForth(source) {
       defs[name] = {
         constant: n
       }
+    } else if (tok === 'immediate') {
+      if (!lastDef || curDef) {
+        throw new Error('Unexpected use of immediate')
+      }
+      lastDef.immediate = true
     } else {
+      if (!curDef) {
+        const name = ` _${topLevelId++}`
+        curDef = defs[name] = {
+          name,
+          words: [],
+          topLevel: true,
+          immediate: false
+        }
+      }
       if (tok.match(/^-?\d+$/)) {
         const n = parseInt(tok)
-        if (curDef) {
-          curDef.words.push(n)
-        } else {
-          // push n on to runtime stack?
-          pushInt(memory, n)
-        }
+        curDef.words.push(n)
       } else {
         const wordDef = defs[tok] ?? prims[tok]
         if (!wordDef) {
           throw new Error('unknown word ' + tok)
         }
-        if (curDef && !wordDef.immediate) {
-          curDef.words.push(tok)
-        } else if (wordDef.constant !== undefined) {
-          pushInt(memory, wordDef.constant)
-        } else if (wordDef.variable !== undefined) {
-          const n = varAddr(wordDef.variable)
-          pushInt(memory, n)
-        } else {
+        if (wordDef.immediate) {
           // eval this word
           if (!wasmInstance?.exports?.[tok]) {
             // Need to compile
             wasmInstance = await compileDefs(defs, memory)
           }
           wasmInstance.instance.exports[tok]()
+        } else if (wordDef.constant !== undefined) {
+          curDef.words.push(wordDef.constant)
+        } else {
+          curDef.words.push(tok)
         }
       }
     }
+  }
+  if (curDef?.topLevel) {
+    wasmInstance = await compileDefs(defs, memory)
+    wasmInstance.instance.exports[curDef.name]()
   }
   return {
     memory,
