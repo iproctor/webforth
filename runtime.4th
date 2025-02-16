@@ -5,11 +5,13 @@
 : align4 3 + -4 and ;
 
 : _dict_entry_len @ 8 + ;
-: _dict_entry_does_xt 4 + @ ;
+: _dict_entry_does_fn_id 4 + @ ;
 : _dict_entry_label_addr 8 + ;
 : _dict_entry_label_len _dict_entry_label_addr @ ;
 : _dict_entry_data_addr dup _dict_entry_label_len align4 swap _dict_entry_label_addr + ;
 : _dict_entry_end dup _dict_entry_len + ;
+
+: _dict_current_set_does _dict_current 4 + ! ;
 
 : _dict_advance_current
   _dict_current 0 =

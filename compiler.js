@@ -1,6 +1,9 @@
 const leb = require('leb128')
 const fs = require('fs')
 const runtime = fs.readFileSync('runtime.4th')
+
+const INLINE_THRESH = 15
+
 function leb128(n) {
   return leb.signed.encode(n)
 }
@@ -63,6 +66,7 @@ const i32 = {
 }
 const wasm = {
   call: idx => [0x10, ...leb128(idx)],
+  call_indirect: [0x11, 0x00, 0x00],
   ifEmpty: [0x04, 0x40], // if with empty block
   else: [0x05],
   endBlock: [0x0b],
@@ -105,6 +109,10 @@ const pushSp = val => [
   ...writeNth(0, val),
   ...moveSp(-4),
 ]
+const popSp = [
+  ...nth(1),
+  ...moveSp(4),
+]
 
 function binPrim(op) {
   return [
@@ -123,7 +131,17 @@ function unPrim(op) {
   ])
 }
 
-const prims = {
+const runtimeImports = [
+  { module: 'js', name: 'mem', desc: [0x02, 0x00, 0x01]},
+  { module: 'js', name: '_writeStreamWord', desc: [0x00, 0x00]},
+  { module: 'js', name: '.', desc: [0x00, 0x00]},
+  { module: 'js', name: 'postpone', desc: [0x00, 0x01]}, // i32 -> ()
+  { module: 'js', name: 'compile,', desc: [0x00, 0x00]},
+]
+const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
+const nImportFunctions = importFunctions.length
+
+const primOps = {
   // ( n -- )
   dup: pushSp(nth(1)),
 
@@ -209,6 +227,24 @@ const prims = {
   // ( a b -- a b a )
   over: pushSp(nth(2)),
 
+  execute: [
+    ...popSp,
+    ...wasm.call_indirect
+  ]
+}
+const primFuncs = {}
+{
+  let pk = nImportFunctions
+  for (const k in primOps) {
+    primFuncs[k] = {
+      name: k,
+      fnId: pk++,
+      code: primOps[k]
+    }
+  }
+}
+const prims = {
+  ...primOps,
   if: [
     ...nth(1),
     ...drop(1),
@@ -217,6 +253,15 @@ const prims = {
   else: wasm.else,
   then: wasm.endBlock,
   dict_start: pushSp(i32.const(DICT_START)),
+}
+const importToIndex = {}
+{
+  let i = 0
+  for (const f of importFunctions) {
+    importToIndex[f.name] = i
+    prims[f.name] = wasm.call(i)
+    i++
+  }
 }
 
 function strBytes(str) {
@@ -240,28 +285,9 @@ function popInt(memory) {
   return val
 }
 
-const runtimeImports = [
-  { module: 'js', name: 'mem', desc: [0x02, 0x00, 0x01]},
-  { module: 'js', name: '_writeStreamWord', desc: [0x00, 0x00]},
-  { module: 'js', name: '.', desc: [0x00, 0x00]},
-]
-const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
-const nImportFunctions = importFunctions.length
-const importToIndex = {}
-{
-  let i = 0
-  for (const f of importFunctions) {
-    importToIndex[f.name] = i
-    prims[f.name] = wasm.call(i)
-    i++
-  }
-}
-
 function buildBinaryModule(funcs) {
     // sort funcs by index
-  const sortedFuncs = Object.entries(funcs)
-    .sort(([,a], [,b]) => a.i - b.i)
-    .map(([name, {code, i}]) => ({name, code, i}));
+  const sortedFuncs = Object.values(funcs).sort((a, b) => a.fnId < b.fnId ? -1 : 1)
 
   // magic number + version
   const header = [
@@ -270,13 +296,17 @@ function buildBinaryModule(funcs) {
   ];
 
   const sections = []
-  // type section (all funcs are () -> ())
+  // type section
   sections.push([
     0x01, // section code
     0x00, // section size
-    0x01, // num types
-    0x60, // func
+    0x02, // num types
+    0x60, // func () -> ()
     0x00, // num params
+    0x00, // num results
+    0x60, // func i32 -> ()
+    0x01, // num params
+    0x7F, // i32
     0x00  // num results
   ]);
 
@@ -301,17 +331,39 @@ function buildBinaryModule(funcs) {
     ...Array(numFuncs).fill(0x00) // all funcs use type 0
   ])
 
+  // table section
+  sections.push([
+    0x04,
+    0x00,
+    0x01, // 1 table
+    0x70, // funcref
+    0x01, // has max
+    ...leb128(numFuncs),
+    ...leb128(numFuncs),
+  ])
+
   // export section
   sections.push([
     0x07, // section code
     0, // section size
-    numFuncs, // num exports
-    ...sortedFuncs.flatMap(({name, i}) => [
+    ...leb128(numFuncs), // num exports
+    ...sortedFuncs.flatMap(({name, fnId}) => [
       name.length, // name length
       ...Array.from(name).map(c => c.charCodeAt(0)), // name
       0x00, // export kind (func)
-      i // func index
+      ...leb128(fnId) // func index
     ])
+  ])
+
+  // element
+  sections.push([
+    0x09,
+    0,
+    1, // 1 segment
+    0, // active default table
+    ...i32.const(0), 0x0B, // put fn at 0
+    ...leb128(numFuncs), // n funcs
+    ...sortedFuncs.flatMap(({fnId}) => [...leb128(fnId)])
   ])
 
   // code section with proper function body sizes
@@ -339,9 +391,10 @@ function buildBinaryModule(funcs) {
 }
 
 // Returns instance
-async function compileDefs(defs, mem, tokStream) {
-  const funcs = {}
-  let i = nImportFunctions
+async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
+  const funcs = {
+    ...primFuncs
+  }
   for (const [name, def] of Object.entries(defs)) {
     if (!def.words) continue
 
@@ -350,6 +403,14 @@ async function compileDefs(defs, mem, tokStream) {
       if (typeof word === 'number') {
         // push n to stack
         code.push(...pushSp(i32.const(word),))
+      } else if (typeof word === 'object') {
+        if (word.postpone) {
+          const def = funcs[word.postpone]
+          code.push(
+            ...i32.const(def.fnId),
+            ...wasm.call(importToIndex.postpone)
+          )
+        }
       } else {
         if (prims[word]) {
           // Inline prims
@@ -362,14 +423,17 @@ async function compileDefs(defs, mem, tokStream) {
           if (wordDef.variable !== undefined) {
             const n = varAddr(wordDef.variable)
             code.push(...pushSp(i32.const(n)))
+          } else if (funcs[word].code.length < INLINE_THRESH) {
+            code.push(...pushSp(i32.const(n)))
           } else {
-            code.push(...wasm.call(funcs[word].i))
+            code.push(...wasm.call(funcs[word].fnId))
           }
         }
       }
     }
     funcs[name] = {
-      i: i++,
+      name,
+      fnId: def.fnId,
       code
     }
   }
@@ -390,7 +454,19 @@ async function compileDefs(defs, mem, tokStream) {
     const n = popInt(mem)
     console.log('dot:', n)
   }
-  const imports = { js: { mem, _writeStreamWord, '.': dot } };
+  const postponeWrapper = n => {
+    postpone(n)
+  }
+  const compileXtWrapper = () => {
+    compileXt(popInt(mem))
+  }
+  const imports = { js: {
+    mem,
+    _writeStreamWord,
+    '.': dot,
+    postpone: postponeWrapper,
+    'compile,': compileXtWrapper
+  } };
   return await WebAssembly.instantiate(binary, imports);
 }
 
@@ -417,7 +493,7 @@ function dictDataAddrLookup(mem, label) {
   const buf8 = new Uint8Array(mem.buffer)
   const currentDict = buf[DICT_START/4]
   if (currentDict === 0) {
-    return
+    return {}
   }
   let entry = DICT_START + 4
   while (entry <= currentDict) {
@@ -425,10 +501,21 @@ function dictDataAddrLookup(mem, label) {
     const entryLabel = Buffer.from(buf8.slice(entry + 12, entry + 12 + labelLen)).toString('utf-8')
     if (entryLabel === label) {
       const labelAlign4 = Math.ceil(labelLen/4)
-      return entry + 12 + labelAlign4*4
+      return {
+        addr: entry + 12 + labelAlign4*4,
+        doesId: buf[entry/4 + 1]
+      }
     }
     entry += entryLen + 8
   }
+  return {}
+}
+
+function xtId(def) {
+  return def.fnId - nImportFunctions
+}
+function xtIdToFnId(xtId) {
+  return xtId + nImportFunctions
 }
 
 // Turn forth source into webassembly wat
@@ -438,8 +525,7 @@ async function runForth(source) {
   let curDef
   let doesDef
   let lastDef
-  let topLevelId = 0
-  let doesId = 0
+  let fnId = Object.keys(primFuncs).length + nImportFunctions
   let wasmInstance
   const createLike = new Set(['create'])
   const memory = new WebAssembly.Memory({
@@ -449,10 +535,41 @@ async function runForth(source) {
   initSp(memory)
   let variableN = 0
   const tokStream = tokenStream(tokens)
+  const lookupDefByFnId = id => {
+    for (const k in defs) {
+      if (defs[k].fnId === id) {
+        return defs[k]
+      }
+    }
+  }
   const compile = async () => {
-    wasmInstance = await compileDefs(defs, memory, tokStream)
+    const postpone = fnId => {
+      if (!curDef) {
+        throw new Error('postponing outside of compilation')
+      }
+      const fnDef = lookupDefByFnId(fnId)
+      if (!fnDef) {
+        throw new Error('unknown postpone fnId ' + fnId)
+      }
+      curDef.words.push(fnDef.name)
+    }
+    const compileXt = xtId => {
+      const fnDef = lookupDefByFnId(xtIdToFnId(xtId))
+      if (!fnDef) {
+        throw new Error('unknown xt ' + xtId)
+      }
+      curDef.words.push(fnDef.name)
+    }
+    wasmInstance = await compileDefs({
+      defs,
+      mem: memory,
+      tokStream,
+      postpone,
+      compileXt,
+    })
   }
   const runTopLevel = async () => {
+    console.log('running topLevel', curDef.words)
     await compile()
     wasmInstance.instance.exports[curDef.name]()
     curDef = null
@@ -473,19 +590,20 @@ async function runForth(source) {
       curDef = defs[name] = {
         name,
         words: [],
+        fnId: fnId++,
         immediate: false
       }
     } else if (tok === 'does>') {
       if (doesDef) {
         throw new Error('Repeated does>')
       }
-      const name = ` _does${doesId}`
+      const name = ` _does${fnId}`
       doesDef = defs[name] = {
         name,
         words: [],
-        doesId
+        fnId: fnId++,
+        does: true
       }
-      doesId++
     } else if (tok === ';') {
       if (!doesDef && (!curDef || curDef.topLevel)) {
         throw new Error('unexpected ;')
@@ -493,10 +611,13 @@ async function runForth(source) {
       if (doesDef) {
         // Gonna assume we are following a CREATE
         curDef.words.push(
-          doesDef.doesId,
-          ' _attach_does'
+          doesDef.fnId,
+          '_dict_current_set_does'
         )
         doesDef = null
+        if (curDef.topLevel) {
+          await runTopLevel()
+        }
       }
       lastDef = curDef
       curDef = null
@@ -514,25 +635,40 @@ async function runForth(source) {
     } else if (tok === 'literal') {
       const n = popInt(memory)
       curDef.words.push(n)
+    } else if (tok === 'postpone') {
+      const name = tokStream.next()
+      curDef.words.push({postpone: name})
+    } else if (tok === "'") {
+      const name = tokStream.next()
+      const def = defs[name] ?? primFuncs[name]
+      if (!def) {
+        throw new Error('quote of unknown def ' + name)
+      }
+      curDef.words.push(xtId(def))
     } else {
-      if (!curDef) {
-        const name = ` _${topLevelId++}`
-        curDef = defs[name] = {
+      let activeDef = doesDef || curDef
+      if (!activeDef) {
+        const name = ` _top${fnId}`
+        activeDef = curDef = defs[name] = {
           name,
           words: [],
           topLevel: true,
+          fnId: fnId++,
           immediate: false
         }
       }
       if (tok.match(/^-?\d+$/)) {
         const n = parseInt(tok)
-        curDef.words.push(n)
+        activeDef.words.push(n)
       } else {
         const wordDef = defs[tok] ?? prims[tok]
         if (!wordDef) {
-          const dictAddr = dictDataAddrLookup(memory, tok)
+          const {addr: dictAddr, doesId} = dictDataAddrLookup(memory, tok)
           if (dictAddr !== undefined) {
-            curDef.words.push(dictAddr)
+            activeDef.words.push(dictAddr)
+            if (doesId) {
+              activeDef.words.push(` _does${doesId}`)
+            }
           } else {
             throw new Error('unknown word ' + tok)
           }
@@ -544,15 +680,15 @@ async function runForth(source) {
           }
           wasmInstance.instance.exports[tok]()
         } else if (wordDef.constant !== undefined) {
-          curDef.words.push(wordDef.constant)
+          activeDef.words.push(wordDef.constant)
         } else {
-          curDef.words.push(tok)
+          activeDef.words.push(tok)
           if (createLike.has(tok)) {
-            if (curDef.topLevel) {
+            if (activeDef.topLevel) {
               // Force run toplevel
               await runTopLevel()
             } else {
-              createLike.add(curDef.name)
+              createLike.add(activeDef.name)
             }
           }
         }

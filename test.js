@@ -119,12 +119,30 @@ async function test() {
     t.equal(popInt(m), 13, 'Read from data')
   }
   {
+    const {memory: m, exports: e} = await runForth('create x 13 , does> @ 2 * ; x')
+    const entries = parseDict(m)
+    t.equal(popInt(m), 26, 'Executed does')
+  }
+  {
+    const {memory: m, exports: e} = await runForth(': dbl_const create , does> @ 2 * ; 13 dbl_const yy yy')
+    const entries = parseDict(m)
+    t.equal(popInt(m), 26, 'Create/does within def')
+  }
+  {
     const {memory: m, exports: e} = await runForth('variable x 3 x ! x @')
     t.equal(popInt(m), 3, 'Wrote and read var top level')
   }
   {
     const {memory: m, exports: e} = await runForth('variable x : test 3 x ! x @ ; test')
     t.equal(popInt(m), 3, 'Wrote and read var compiled')
+  }
+  {
+    const {memory: m, exports: e} = await runForth(': +1 1 + ; : imm+ postpone +1 ; immediate 3 imm+')
+    t.equal(popInt(m), 4, 'immediate postpone works')
+  }
+  {
+    const {memory: m, exports: e} = await runForth("3 ' dup execute *")
+    t.equal(popInt(m), 9, 'quote and execute works')
   }
 }
 test()
