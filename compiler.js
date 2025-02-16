@@ -542,6 +542,25 @@ async function runForth(source) {
       }
     }
   }
+  const compileWord = wordDef => {
+    if (wordDef.immediate) {
+    // eval this word
+    if (!wasmInstance?.exports?.[tok]) {
+      // Need to compile
+      await compile()
+    }
+    wasmInstance.instance.exports[tok]()
+  } else {
+    activeDef.words.push(tok)
+    if (createLike.has(tok)) {
+      if (activeDef.topLevel) {
+        // Force run toplevel
+        await runTopLevel()
+      } else {
+        createLike.add(activeDef.name)
+      }
+    }
+  }
   const compile = async () => {
     const postpone = fnId => {
       if (!curDef) {
@@ -551,6 +570,7 @@ async function runForth(source) {
       if (!fnDef) {
         throw new Error('unknown postpone fnId ' + fnId)
       }
+      // TODO i guess if this is an immediate then we run it?
       curDef.words.push(fnDef.name)
     }
     const compileXt = xtId => {
@@ -672,25 +692,10 @@ async function runForth(source) {
           } else {
             throw new Error('unknown word ' + tok)
           }
-        } else if (wordDef.immediate) {
-          // eval this word
-          if (!wasmInstance?.exports?.[tok]) {
-            // Need to compile
-            await compile()
-          }
-          wasmInstance.instance.exports[tok]()
         } else if (wordDef.constant !== undefined) {
           activeDef.words.push(wordDef.constant)
         } else {
-          activeDef.words.push(tok)
-          if (createLike.has(tok)) {
-            if (activeDef.topLevel) {
-              // Force run toplevel
-              await runTopLevel()
-            } else {
-              createLike.add(activeDef.name)
-            }
-          }
+          compileWord(wordDef)
         }
       }
     }
