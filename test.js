@@ -141,6 +141,10 @@ async function test() {
     t.equal(popInt(m), 4, 'immediate postpone works')
   }
   {
+    const {memory: m, exports: e} = await runForth(': +1 1 + ; : imm+ ]] +1 +1 [[ ; immediate 3 imm+')
+    t.equal(popInt(m), 5, 'immediate ]] [[ works')
+  }
+  {
     const {memory: m, exports: e} = await runForth("3 ' dup execute *")
     t.equal(popInt(m), 9, 'quote and execute works')
   }

@@ -420,10 +420,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
         } else {
           // TODO could inline small words
           const wordDef = defs[word]
-          if (wordDef.variable !== undefined) {
-            const n = varAddr(wordDef.variable)
-            code.push(...pushSp(i32.const(n)))
-          } else if (funcs[word].code.length < INLINE_THRESH) {
+          if (funcs[word].code.length < INLINE_THRESH) {
             code.push(...pushSp(i32.const(n)))
           } else {
             code.push(...wasm.call(funcs[word].fnId))
@@ -541,44 +538,54 @@ async function runForth(source) {
         return defs[k]
       }
     }
-  }
-  const compileWord = wordDef => {
-    if (wordDef.immediate) {
-    // eval this word
-    if (!wasmInstance?.exports?.[tok]) {
-      // Need to compile
-      await compile()
+    for (const k in primOps) {
+      if (primOps[k].fnId === id) {
+        return primOps[k]
+      }
     }
-    wasmInstance.instance.exports[tok]()
-  } else {
-    activeDef.words.push(tok)
-    if (createLike.has(tok)) {
-      if (activeDef.topLevel) {
-        // Force run toplevel
-        await runTopLevel()
-      } else {
-        createLike.add(activeDef.name)
+  }
+  const compileWord = async (activeDef, name, wordDef) => {
+    if (wordDef.immediate) {
+      // eval this word
+      if (!wasmInstance?.exports?.[name]) {
+        // Need to compile
+        await compile()
+      }
+      wasmInstance.instance.exports[name]()
+    } else {
+      activeDef.words.push(name)
+      if (createLike.has(name)) {
+        if (activeDef.topLevel) {
+          // Force run toplevel
+          await runTopLevel()
+        } else {
+          createLike.add(activeDef.name)
+        }
       }
     }
   }
   const compile = async () => {
-    const postpone = fnId => {
-      if (!curDef) {
+    const postpone = async fnId => {
+      let activeDef = doesDef || curDef
+      if (!activeDef) {
         throw new Error('postponing outside of compilation')
       }
       const fnDef = lookupDefByFnId(fnId)
       if (!fnDef) {
         throw new Error('unknown postpone fnId ' + fnId)
       }
-      // TODO i guess if this is an immediate then we run it?
-      curDef.words.push(fnDef.name)
+      await compileWord(activeDef, fnDef.name, fnDef)
     }
-    const compileXt = xtId => {
+    const compileXt = async xtId => {
+      let activeDef = doesDef || curDef
+      if (!activeDef) {
+        throw new Error('compileXt outside of compilation')
+      }
       const fnDef = lookupDefByFnId(xtIdToFnId(xtId))
       if (!fnDef) {
         throw new Error('unknown xt ' + xtId)
       }
-      curDef.words.push(fnDef.name)
+      await compileWord(activeDef, fnDef.name, fnDef)
     }
     wasmInstance = await compileDefs({
       defs,
@@ -658,6 +665,10 @@ async function runForth(source) {
     } else if (tok === 'postpone') {
       const name = tokStream.next()
       curDef.words.push({postpone: name})
+    } else if (tok === ']]') {
+      for (let next = tokStream.next(); next !== '[['; next = tokStream.next()) {
+        curDef.words.push({postpone: next})
+      }
     } else if (tok === "'") {
       const name = tokStream.next()
       const def = defs[name] ?? primFuncs[name]
@@ -695,7 +706,7 @@ async function runForth(source) {
         } else if (wordDef.constant !== undefined) {
           activeDef.words.push(wordDef.constant)
         } else {
-          compileWord(wordDef)
+          await compileWord(activeDef, tok, wordDef)
         }
       }
     }
