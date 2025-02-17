@@ -192,6 +192,18 @@ const primOps = {
 
   '>r': rStack.pushSp(stack.popSp),
   'r>': stack.pushSp(rStack.popSp),
+  '2r>': [
+    ...stack.moveSp(-8),
+    ...stack.writeNth(2, rStack.nth(2)),
+    ...stack.writeNth(1, rStack.nth(1)),
+    ...rStack.moveSp(8),
+  ],
+  '2>r': [
+    ...rStack.moveSp(-8),
+    ...rStack.writeNth(2, stack.nth(2)),
+    ...rStack.writeNth(1, stack.nth(1)),
+    ...stack.moveSp(8),
+  ],
 
   // ( a b -- a+b )
   '+': binPrim(i32.add),
@@ -565,9 +577,9 @@ async function runForth(source) {
         return defs[k]
       }
     }
-    for (const k in primOps) {
-      if (primOps[k].fnId === id) {
-        return primOps[k]
+    for (const k in primFuncs) {
+      if (primFuncs[k].fnId === id) {
+        return primFuncs[k]
       }
     }
   }

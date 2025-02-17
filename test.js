@@ -153,6 +153,10 @@ async function test() {
     t.equal(popInt(m), 1, 'return stack')
   }
   {
+    const {memory: m, exports: e} = await runForth("1 2 2>r 0 2r> +")
+    t.equal(popInt(m), 3, 'return stack 2')
+  }
+  {
     const {memory: m, exports: e} = await runForth("1 2 3 v swap * +")
     t.equal(popInt(m), 5, 'v macro test')
   }

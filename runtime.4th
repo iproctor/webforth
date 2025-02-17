@@ -34,3 +34,4 @@
 : variable create 0 , ;
 
 : v postpone >r ' compile, postpone r> ; immediate
+: v. postpone dup postpone v ; immediate
