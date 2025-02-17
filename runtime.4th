@@ -32,3 +32,5 @@
   dup @ 4 + swap ! ;
 
 : variable create 0 , ;
+
+: v postpone >r ' compile, postpone r> ; immediate
