@@ -70,12 +70,15 @@ const wasm = {
   call_indirect: [0x11, 0x00, 0x00],
   ifEmpty: [0x04, 0x40], // if with empty block
   else: [0x05],
+  block: [0x02, 0x40],
+  loop: [0x03, 0x40],
   endBlock: [0x0b],
   local_get: n => [0x20, ...leb128(n)],
   local_set: n => [0x21, ...leb128(n)],
   local_tee: n => [0x22, ...leb128(n)],
   global_get: n => [0x23, ...leb128(n)],
   global_set: n => [0x24, ...leb128(n)],
+  br: n => [0x0C, ...leb128(n)]
 }
 
 const STACK_SIZE = 1024
@@ -265,7 +268,7 @@ const pureOps = {
   '@': [i32.load(0), 1, 1],
 }
 
-const primOps = {
+const primFuncOps = {
   // ( n -- )
   dup: [
     ...stack.nth(1),
@@ -332,7 +335,7 @@ const primOps = {
     ...rStack.writeNth(1),
     ...stack.moveSp(8),
   ],
-
+  rdrop: rStack.drop(1),
 
   // ( val addr -- )
   '!': [
@@ -363,37 +366,66 @@ const primOps = {
   ]
 }
 for (const k in binOps) {
-  primOps[k] = binPrim(binOps[k])
+  primFuncOps[k] = binPrim(binOps[k])
   pureOps[k] = [binOps[k], 2, 1]
 }
 for (const k in unaryOps) {
-  primOps[k] = unPrim(unaryOps[k])
+  primFuncOps[k] = unPrim(unaryOps[k])
   pureOps[k] = [unaryOps[k], 1, 1]
 }
 const primFuncs = {}
 {
   let pk = nImportFunctions
-  for (const k in primOps) {
+  for (const k in primFuncOps) {
     primFuncs[k] = {
       name: k,
       fnId: pk++,
-      code: optimize([...primOps[k]])
+      code: optimize([...primFuncOps[k]])
     }
   }
 }
-const prims = {
-  ...primOps,
+const controlInstructions = {
   if: [
-    ...stack.nth(1),
-    ...stack.drop(1),
+    stack.irPop(1),
     ...wasm.ifEmpty,
   ],
-  else: wasm.else,
   then: wasm.endBlock,
+  infloop: [
+    ...wasm.block,
+    ...wasm.loop,
+  ],
+  break: wasm.br(1),
+  continue: wasm.br(0),
+  endinf: [
+    ...wasm.br(0),
+    ...wasm.endBlock,
+    ...wasm.endBlock,
+  ],
+}
+const primNonFuncOps = {
+  if: [{ir: 'if'}],
+  else: wasm.else,
+  then: [{ir: 'then'}],
+
+  infloop: [{ir: 'infloop'}],
+  break: [{ir: 'break'}],
+  continue: [{ir: 'continue'}],
+  endinf: [{ir: 'endinf'}],
+}
+const primNonFuncIds = {}
+{
+  let id = -1
+  for (const k in primNonFuncOps) {
+    primNonFuncIds[k] = id--
+  }
+}
+const prims = {
+  ...primFuncOps,
+  ...primNonFuncOps,
   dict_start: [
     ...i32.const(DICT_START),
     stack.irPush(1)
-  ]
+  ],
 }
 const importToIndex = {}
 {
@@ -588,7 +620,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
   for (const [name, def] of Object.entries(defs)) {
     if (!def.words) continue
 
-    const code = []
+    let code = []
     const words = [...def.words]
     for (let i = 0; i < words.length; i++) {
       let word = words[i]
@@ -627,9 +659,12 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
         }
       } else if (typeof word === 'object') {
         if (word.postpone) {
-          const def = funcs[word.postpone]
+          const id = primNonFuncIds[word.postpone] ?? funcs[word.postpone]?.fnId
+          if (id === undefined) {
+            throw new Error('Unknown postpone word')
+          }
           code.push(
-            ...i32.const(def.fnId),
+            ...i32.const(id),
             ...wasm.call(importToIndex.postpone)
           )
         }
@@ -651,6 +686,34 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
         }
       }
     }
+    const ifStack = [0]
+    const newCode = []
+    for (const inst of code) {
+      if (typeof inst !== 'object') {
+        newCode.push(inst)
+        continue
+      }
+      if (inst.ir === 'if') {
+        ifStack[ifStack.length - 1]++
+        newCode.push(...controlInstructions.if)
+      } else if (inst.ir === 'then') {
+        ifStack[ifStack.length - 1]--
+        newCode.push(...controlInstructions.then)
+      } else if (inst.ir === 'infloop') {
+        ifStack.push(0)
+        newCode.push(...controlInstructions.infloop)
+      } else if (inst.ir === 'break') {
+        newCode.push(...wasm.br(1 + ifStack[ifStack.length - 1]))
+      } else if (inst.ir === 'continue') {
+        newCode.push(...wasm.br(ifStack[ifStack.length - 1]))
+      } else if (inst.ir === 'endinf') {
+        ifStack.pop()
+        newCode.push(...controlInstructions.endinf)
+      } else {
+        newCode.push(inst)
+      }
+    }
+    code = newCode
     optimize(code)
     funcs[name] = {
       name,
@@ -794,11 +857,22 @@ async function runForth(source) {
       if (!activeDef) {
         throw new Error('postponing outside of compilation')
       }
-      const fnDef = lookupDefByFnId(fnId)
-      if (!fnDef) {
-        throw new Error('unknown postpone fnId ' + fnId)
+      let name, fnDef = {}
+      if (fnId < 0) {
+        for (const k in primNonFuncIds) {
+          if (primNonFuncIds[k] === fnId) {
+            name = k
+            break
+          }
+        }
+      } else {
+        fnDef = lookupDefByFnId(fnId)
+        if (!fnDef) {
+          throw new Error('unknown postpone fnId ' + fnId)
+        }
+        name = fnDef.name
       }
-      await compileWord(activeDef, fnDef.name, fnDef)
+      await compileWord(activeDef, name, fnDef)
     }
     const compileXt = async xtId => {
       let activeDef = doesDef || curDef
