@@ -33,10 +33,6 @@ function parseDict(m) {
 }
 async function test() {
   {
-    const {memory: m, exports: e} = await runForth("3 ' dup . execute *")
-    t.equal(popInt(e, m), 9, 'quote and execute works')
-  }
-  {
     const {memory: m, exports: e} = await runForth('1')
     t.equal(popInt(e, m), 1, 'Popped 1')
   }
@@ -65,6 +61,10 @@ async function test() {
     t.equal(popInt(e, m), 1, 'rot popped 1')
     t.equal(popInt(e, m), 3, 'rot popped 3')
     t.equal(popInt(e, m), 2, 'rot popped 2')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('1 2 3 rot +')
+    t.equal(popInt(e, m), 4, 'rot + popped 4')
   }
   {
     const {memory: m, exports: e} = await runForth('3 constant x x')

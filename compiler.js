@@ -2,7 +2,8 @@ const leb = require('leb128')
 const fs = require('fs')
 const runtime = fs.readFileSync('runtime.4th')
 
-const INLINE_THRESH = 15
+const INLINE_THRESH = 5
+const N_LOCALS = 2
 
 function leb128(n) {
   return leb.signed.encode(n)
@@ -70,8 +71,9 @@ const wasm = {
   ifEmpty: [0x04, 0x40], // if with empty block
   else: [0x05],
   endBlock: [0x0b],
-  local_get: [0x20, 0x00],
-  local_set: [0x21, 0x00],
+  local_get: n => [0x20, ...leb128(n)],
+  local_set: n => [0x21, ...leb128(n)],
+  local_tee: n => [0x22, ...leb128(n)],
   global_get: n => [0x23, ...leb128(n)],
   global_set: n => [0x24, ...leb128(n)],
 }
@@ -92,9 +94,9 @@ function stackOps(globalIdx) {
   ]
   const nth = n => derefSp(n * 4)
   const derefWriteSp = (offset) => [
-    ...wasm.local_set, // store v
+    ...wasm.local_set(0), // store v
     ...readSp,
-    ...wasm.local_get, // push v
+    ...wasm.local_get(0), // push v
     ...i32.store(offset)
   ]
   const writeNth = n => derefWriteSp(n * 4)
@@ -109,16 +111,54 @@ function stackOps(globalIdx) {
     ...setSp
   ]
   const drop = n => moveSp(n * 4)
-  const pushSp = [
-    ...writeNth(0),
-    ...moveSp(-4),
-  ]
-  const popSp = [
-    ...nth(1),
-    ...moveSp(4),
-  ]
-  const irPush = {ir: 'push', stack: globalIdx}
-  const irPop = {ir: 'pop', stack: globalIdx}
+  const pushSp = n => {
+    const ret = [
+      ...moveSp(n * -4)
+    ]
+    for (let i = 0; i < n; i++) {
+      ret.push(...writeNth(i+1))
+    }
+    return ret
+  }
+  const popSp = n => {
+    const ret = []
+    for (let i = 0; i < n; i++) {
+      ret.push(...nth(n - i))
+    }
+    ret.push(...moveSp(n * 4))
+    return ret
+  }
+  const irPush = n => ({ir: 'push', stack: globalIdx, n})
+  const irPop = n => ({ir: 'pop', stack: globalIdx, n})
+  const mergePushPop = ({n: pushN}, {n: popN}) => {
+    if (pushN === popN) {
+      return []
+    }
+    if (pushN < popN && pushN <= N_LOCALS) {
+      // More needing to be popped.
+      const ret = []
+      // Save pushed to locals
+      for (let i = 0; i < pushN; i++) {
+        ret.push(...wasm.local_set(i)) // local_set 0
+      }
+      // Load up bottom values into stack
+      for (let i = popN - pushN; i >= 1; i--) {
+        ret.push(...nth(i)) // nth(2)
+      }
+      // Restore top values
+      for (let i = pushN - 1; i >= 0; i--) {
+        ret.push(...wasm.local_get(i))
+      }
+      // Move stack pointer
+      ret.push(...moveSp(4*(popN - pushN)))
+      return ret
+    }
+    // Otherwise just emit the full push and the full pop
+    return [
+      ...pushSp(pushN),
+      ...popSp(popN)
+    ]
+  }
   return {
     readSp,
     derefSp,
@@ -131,38 +171,24 @@ function stackOps(globalIdx) {
     pushSp,
     popSp,
     irPush,
-    irPop
+    irPop,
+    mergePushPop
   }
 }
 const stack = stackOps(0)
 const rStack = stackOps(1)
 function binPrim(op) {
   return [
-    stack.irPop,
-    ...wasm.local_set,
-    stack.irPop,
-    ...wasm.local_get,
+    stack.irPop(2),
     ...op,
-    stack.irPush
-  ]
-  return [
-    ...stack.nth(2),
-    ...stack.nth(1),
-    ...op,
-    ...stack.writeNth(2),
-    ...stack.drop(1),
+    stack.irPush(1)
   ]
 }
 function unPrim(op) {
   return [
-    stack.irPop,
+    stack.irPop(1),
     ...op,
-    stack.irPush
-  ]
-  return [
-    ...stack.nth(1),
-    ...op,
-    ...stack.writeNth(1)
+    stack.irPush(1)
   ]
 }
 
@@ -177,11 +203,73 @@ const runtimeImports = [
 const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
 const nImportFunctions = importFunctions.length
 
+const binOps = {
+  '+': i32.add,
+
+  // ( a b -- a-b
+  '-': i32.sub,
+
+  // ( a b -- a*b )
+  '*': i32.mul,
+  '=':  i32.eq,
+  '<>': i32.ne,
+  '<':  i32.lt_s,
+  'u<': i32.lt_u,
+  '>':  i32.gt_s,
+  'u>': i32.gt_u,
+  '<=': i32.le_s,
+  'u<=':i32.le_u,
+  '>=': i32.ge_s,
+  'u>=':i32.ge_u,
+
+  // bitwise ops
+  'and': i32.and,
+  'or':  i32.or,
+  'xor': i32.xor,
+  'lshift': i32.shl,
+  'rshift': i32.shr_u, // forth traditionally uses unsigned
+  'rotate': i32.rotl,  // might want both rotl/rotr tbh
+
+  // division & remainder
+  '/': i32.div_s,
+  'u/': i32.div_u,
+  'mod': i32.rem_s,
+  'umod': i32.rem_u,
+}
+
+const unaryOps = {
+  // bit counting (unary prims)
+  'clz': i32.clz,
+  'ctz': i32.ctz,
+  'popcnt': i32.popcnt,
+}
+
+const pureOps = {
+  dup: [[
+    ...wasm.local_tee(0),
+    ...wasm.local_get(0)
+  ], 1, 2],
+  swap: [[
+    ...wasm.local_set(0),
+    ...wasm.local_set(1),
+    ...wasm.local_get(0),
+    ...wasm.local_get(1),
+  ], 2, 2],
+  drop: [wasm.local_set(0), 1, 0],
+  over: [[
+    ...wasm.local_set(0),
+    ...wasm.local_tee(1),
+    ...wasm.local_get(0),
+    ...wasm.local_get(1),
+  ], 2, 3],
+  '@': [i32.load(0), 1, 1],
+}
+
 const primOps = {
   // ( n -- )
   dup: [
     ...stack.nth(1),
-    stack.irPush
+    stack.irPush(1)
   ],
 
   // ( a b -- b a )
@@ -221,12 +309,12 @@ const primOps = {
 
 
   '>r': [
-    stack.irPop,
-    rStack.irPush
+    stack.irPop(1),
+    rStack.irPush(1)
   ],
   'r>': [
-    rStack.irPop,
-    stack.irPush
+    rStack.irPop(1),
+    stack.irPush(1)
   ],
   '2r>': [
     ...stack.moveSp(-8),
@@ -245,45 +333,6 @@ const primOps = {
     ...stack.moveSp(8),
   ],
 
-  // ( a b -- a+b )
-  '+': binPrim(i32.add),
-
-  // ( a b -- a-b )
-  '-': binPrim(i32.sub),
-
-  // ( a b -- a*b )
-  '*': binPrim(i32.mul),
-
-    // comparison (all leave flag on stack)
-  '=':  binPrim(i32.eq),
-  '<>': binPrim(i32.ne),
-  '<':  binPrim(i32.lt_s),
-  'u<': binPrim(i32.lt_u),
-  '>':  binPrim(i32.gt_s),
-  'u>': binPrim(i32.gt_u),
-  '<=': binPrim(i32.le_s),
-  'u<=':binPrim(i32.le_u),
-  '>=': binPrim(i32.ge_s),
-  'u>=':binPrim(i32.ge_u),
-
-  // bitwise ops
-  'and': binPrim(i32.and),
-  'or':  binPrim(i32.or),
-  'xor': binPrim(i32.xor),
-  'lshift': binPrim(i32.shl),
-  'rshift': binPrim(i32.shr_u), // forth traditionally uses unsigned
-  'rotate': binPrim(i32.rotl),  // might want both rotl/rotr tbh
-
-  // division & remainder
-  '/': binPrim(i32.div_s),
-  'u/': binPrim(i32.div_u),
-  'mod': binPrim(i32.rem_s),
-  'umod': binPrim(i32.rem_u),
-
-  // bit counting (unary prims)
-  'clz': unPrim(i32.clz),
-  'ctz': unPrim(i32.ctz),
-  'popcnt': unPrim(i32.popcnt),
 
   // ( val addr -- )
   '!': [
@@ -305,13 +354,21 @@ const primOps = {
   // ( a b -- a b a )
   over: [
     ...stack.nth(2),
-    stack.irPush,
+    stack.irPush(1),
   ],
 
   execute: [
-    stack.irPop,
+    stack.irPop(1),
     ...wasm.call_indirect
   ]
+}
+for (const k in binOps) {
+  primOps[k] = binPrim(binOps[k])
+  pureOps[k] = [binOps[k], 2, 1]
+}
+for (const k in unaryOps) {
+  primOps[k] = unPrim(unaryOps[k])
+  pureOps[k] = [unaryOps[k], 1, 1]
 }
 const primFuncs = {}
 {
@@ -335,7 +392,7 @@ const prims = {
   then: wasm.endBlock,
   dict_start: [
     ...i32.const(DICT_START),
-    stack.irPush
+    stack.irPush(1)
   ]
 }
 const importToIndex = {}
@@ -475,7 +532,7 @@ function buildBinaryModule(funcs) {
     numFuncs, // count
     ...sortedFuncs.flatMap(f => [
       ...leb128(f.code.length + 2 + 2), // size prefix for each function
-      1, 1, 0x7F,
+      1, ...leb128(N_LOCALS), 0x7F,
       ...f.code,
       0x0b
     ])
@@ -496,7 +553,7 @@ function isPushPopPair(i1, i2) {
   if (typeof i1 !== 'object' || typeof i2 !== 'object') {
     return
   }
-  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack === i2.stack
+  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack === i2.stack && i2.n - i1.n <= N_LOCALS
 }
 
 function optimize(code) {
@@ -506,12 +563,13 @@ function optimize(code) {
     const next = code[i+1]
     // TODO pop op push -> read op set
     if (isPushPopPair(cur, next)) {
-      code.splice(i, 2)
+      const transfer = stackOps(cur.stack).mergePushPop(cur, next)
+      code.splice(i, 2, ...transfer)
     } else if (typeof cur === 'object') {
       if (cur.ir === 'pop') {
-        code.splice(i, 1, ...stackOps(cur.stack).popSp)
+        code.splice(i, 1, ...stackOps(cur.stack).popSp(cur.n))
       } else if (cur.ir === 'push') {
-        code.splice(i, 1, ...stackOps(cur.stack).pushSp)
+        code.splice(i, 1, ...stackOps(cur.stack).pushSp(cur.n))
       }
     } else {
       i++
@@ -519,6 +577,8 @@ function optimize(code) {
   }
   return code
 }
+
+const isPure = word => typeof word === 'number' || (typeof word === 'string' && pureOps[word])
 
 // Returns instance
 async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt}) {
@@ -529,13 +589,42 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     if (!def.words) continue
 
     const code = []
-    for (const word of def.words) {
-      if (typeof word === 'number') {
-        // push n to stack
-        code.push(
-          ...i32.const(word),
-          stack.irPush
-        )
+    const words = [...def.words]
+    for (let i = 0; i < words.length; i++) {
+      let word = words[i]
+      if (isPure(word)) {
+        const pureSeq = []
+        let maxStackDepth = 0
+        let curStackDepth = 0
+
+        while (true) {
+          if (typeof word === 'number') {
+            pureSeq.push(...i32.const(word))
+            curStackDepth--
+          } else {
+            const [code, popN, pushN] = pureOps[word]
+            pureSeq.push(...code)
+            curStackDepth += popN
+            if (curStackDepth > maxStackDepth) {
+              maxStackDepth = curStackDepth
+            }
+            curStackDepth -= pushN
+          }
+          i++
+          word = words[i]
+          if (!isPure(word)) {
+            i--
+            break
+          }
+        }
+        const toCopy = maxStackDepth - curStackDepth
+        if (maxStackDepth > 0) {
+          code.push(stack.irPop(maxStackDepth))
+        }
+        code.push(...pureSeq)
+        if (toCopy > 0) {
+          code.push(stack.irPush(toCopy))
+        }
       } else if (typeof word === 'object') {
         if (word.postpone) {
           const def = funcs[word.postpone]
@@ -551,10 +640,11 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
         } else if (importToIndex[word] !== undefined) {
           code.push(...wasm.call(importToIndex[word]))
         } else {
-          // TODO could inline small words
           const wordDef = defs[word]
-          if (funcs[word].code.length < INLINE_THRESH) {
-            code.push(...i32.const(n), stack.irPush)
+          if (wordDef.words.length < INLINE_THRESH) {
+            words.splice(i, 1, ...wordDef.words)
+            i--
+            continue
           } else {
             code.push(...wasm.call(funcs[word].fnId))
           }
@@ -869,5 +959,6 @@ module.exports = {
   runForth,
   popInt,
   STACK_START,
-  DICT_START
+  DICT_START,
+  printMem
 }
