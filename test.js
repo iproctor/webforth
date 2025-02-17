@@ -167,7 +167,7 @@ async function test() {
     t.equal(popInt(e, m), 5, 'v macro test')
   }
   {
-    const {memory: m, exports: e} = await runForth("0 infloop 1 + dup 10 = if 0 if else break then then endinf")
+    const {memory: m, exports: e} = await runForth("0 begin 1 + dup 10 = if 0 if else break then then again")
     t.equal(popInt(e, m), 10, 'loop test')
   }
   {

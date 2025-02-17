@@ -394,13 +394,13 @@ const controlInstructions = {
     ...wasm.ifEmpty,
   ],
   then: wasm.endBlock,
-  infloop: [
+  begin: [
     ...wasm.block,
     ...wasm.loop,
   ],
   break: wasm.br(1),
   continue: wasm.br(0),
-  endinf: [
+  again: [
     ...wasm.br(0),
     ...wasm.endBlock,
     ...wasm.endBlock,
@@ -411,10 +411,10 @@ const primNonFuncOps = {
   else: wasm.else,
   then: [{ir: 'then'}],
 
-  infloop: [{ir: 'infloop'}],
+  begin: [{ir: 'begin'}],
   break: [{ir: 'break'}],
   continue: [{ir: 'continue'}],
-  endinf: [{ir: 'endinf'}],
+  again: [{ir: 'again'}],
 }
 const primNonFuncIds = {}
 {
@@ -719,16 +719,16 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
       } else if (inst.ir === 'then') {
         ifStack[ifStack.length - 1]--
         newCode.push(...controlInstructions.then)
-      } else if (inst.ir === 'infloop') {
+      } else if (inst.ir === 'begin') {
         ifStack.push(0)
-        newCode.push(...controlInstructions.infloop)
+        newCode.push(...controlInstructions.begin)
       } else if (inst.ir === 'break') {
         newCode.push(...wasm.br(1 + ifStack[ifStack.length - 1]))
       } else if (inst.ir === 'continue') {
         newCode.push(...wasm.br(ifStack[ifStack.length - 1]))
-      } else if (inst.ir === 'endinf') {
+      } else if (inst.ir === 'again') {
         ifStack.pop()
-        newCode.push(...controlInstructions.endinf)
+        newCode.push(...controlInstructions.again)
       } else {
         newCode.push(inst)
       }

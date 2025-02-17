@@ -36,14 +36,15 @@
 : v postpone >r ' compile, postpone r> ; immediate
 : v. postpone dup postpone v ; immediate
 
-: do ]] 2>r infloop [[ ; immediate
-
+: do ]] 2>r begin [[ ; immediate
 
 : +loop ]]
     r> + dup >r
     rover r> = if break then
-    endinf
+    again
     rdrop rdrop
     [[ ; immediate
 
 : loop ]] 1 +loop [[ ; immediate
+
+: until ]] if break then again [[ ; immediate
