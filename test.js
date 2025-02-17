@@ -1,14 +1,7 @@
-const {runForth, popInt, STACK_START, DICT_START} = require('./compiler')
+const {runForth, popInt, STACK_START, DICT_START, printMem} = require('./compiler')
 const t = require('tap')
 
 
-function printMem(m) {
-  const buf = new Int32Array(m.buffer)
-  console.log('sp', buf[STACK_START/4 + 1])
-  for (let i = 0; i < 10; i++) {
-    console.log(i, buf[STACK_START/4 - i].toString(16))
-  }
-}
 function parseDict(m) {
   const buf = new Int32Array(m.buffer)
   const buf8 = new Uint8Array(m.buffer)
@@ -53,6 +46,11 @@ async function test() {
     const {memory: m} = await runForth('1 2 swap')
     t.equal(popInt(m), 1, 'swap popped 1')
     t.equal(popInt(m), 2, 'swap popped 2')
+  }
+  {
+    const {memory: m} = await runForth('2 dup')
+    t.equal(popInt(m), 2, 'dup popped 2')
+    t.equal(popInt(m), 2, 'dup popped 2')
   }
   {
     const {memory: m} = await runForth('1 2 drop')
