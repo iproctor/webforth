@@ -33,66 +33,70 @@ function parseDict(m) {
 }
 async function test() {
   {
-    const {memory: m} = await runForth('1')
-    t.equal(popInt(m), 1, 'Popped 1')
+    const {memory: m, exports: e} = await runForth("3 ' dup . execute *")
+    t.equal(popInt(e, m), 9, 'quote and execute works')
   }
   {
-    const {memory: m} = await runForth('1 2 3')
-    t.equal(popInt(m), 3, 'Popped 3')
-    t.equal(popInt(m), 2, 'Popped 2')
-    t.equal(popInt(m), 1, 'Popped 1')
+    const {memory: m, exports: e} = await runForth('1')
+    t.equal(popInt(e, m), 1, 'Popped 1')
   }
   {
-    const {memory: m} = await runForth('1 2 swap')
-    t.equal(popInt(m), 1, 'swap popped 1')
-    t.equal(popInt(m), 2, 'swap popped 2')
+    const {memory: m, exports: e} = await runForth('1 2 3')
+    t.equal(popInt(e, m), 3, 'Popped 3')
+    t.equal(popInt(e, m), 2, 'Popped 2')
+    t.equal(popInt(e, m), 1, 'Popped 1')
   }
   {
-    const {memory: m} = await runForth('2 dup')
-    t.equal(popInt(m), 2, 'dup popped 2')
-    t.equal(popInt(m), 2, 'dup popped 2')
+    const {memory: m, exports: e} = await runForth('1 2 swap')
+    t.equal(popInt(e, m), 1, 'swap popped 1')
+    t.equal(popInt(e, m), 2, 'swap popped 2')
   }
   {
-    const {memory: m} = await runForth('1 2 drop')
-    t.equal(popInt(m), 1, 'drop popped 1')
+    const {memory: m, exports: e} = await runForth('2 dup')
+    t.equal(popInt(e, m), 2, 'dup popped 2')
+    t.equal(popInt(e, m), 2, 'dup popped 2')
   }
   {
-    const {memory: m} = await runForth('1 2 3 rot')
-    t.equal(popInt(m), 1, 'rot popped 1')
-    t.equal(popInt(m), 3, 'rot popped 3')
-    t.equal(popInt(m), 2, 'rot popped 2')
+    const {memory: m, exports: e} = await runForth('1 2 drop')
+    t.equal(popInt(e, m), 1, 'drop popped 1')
   }
   {
-    const {memory: m} = await runForth('3 constant x x')
-    t.equal(popInt(m), 3, 'Popped constant')
+    const {memory: m, exports: e} = await runForth('1 2 3 rot')
+    t.equal(popInt(e, m), 1, 'rot popped 1')
+    t.equal(popInt(e, m), 3, 'rot popped 3')
+    t.equal(popInt(e, m), 2, 'rot popped 2')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('3 constant x x')
+    t.equal(popInt(e, m), 3, 'Popped constant')
   }
   {
     const {memory: m, exports: e} = await runForth('1 2 +')
-    t.equal(popInt(m), 3, 'Did immediate addition')
+    t.equal(popInt(e, m), 3, 'Did immediate addition')
   }
   {
     const {memory: m, exports: e} = await runForth(': x 1 ; x')
-    t.equal(popInt(m), 1, 'Popped 1 after call')
+    t.equal(popInt(e, m), 1, 'Popped 1 after call')
   }
   {
     const {memory: m, exports: e} = await runForth(': x 1 + ; 2 x')
-    t.equal(popInt(m), 3, 'Did addition')
+    t.equal(popInt(e, m), 3, 'Did addition')
   }
   {
     const {memory: m, exports: e} = await runForth('3 1 1 = if 2 * then')
-    t.equal(popInt(m), 6, 'True condition for if')
+    t.equal(popInt(e, m), 6, 'True condition for if')
   }
   {
     const {memory: m, exports: e} = await runForth('3 1 2 = if 2 * then')
-    t.equal(popInt(m), 3, 'False condition for if')
+    t.equal(popInt(e, m), 3, 'False condition for if')
   }
   {
     const {memory: m, exports: e} = await runForth('3 1 1 = if 2 * else 3 * then')
-    t.equal(popInt(m), 6, 'True condition for if/else')
+    t.equal(popInt(e, m), 6, 'True condition for if/else')
   }
   {
     const {memory: m, exports: e} = await runForth('3 1 2 = if 2 * else 3 * then')
-    t.equal(popInt(m), 9, 'False condition for if/else')
+    t.equal(popInt(e, m), 9, 'False condition for if/else')
   }
   {
     const {memory: m, exports: e} = await runForth('create goober')
@@ -113,50 +117,50 @@ async function test() {
     const entries = parseDict(m)
     t.equal(entries[0].data[0], 13, 'create value 1')
     t.equal(entries[0].data[1], 15, 'create value 2')
-    t.equal(popInt(m), 15, 'Read from data')
-    t.equal(popInt(m), 13, 'Read from data')
+    t.equal(popInt(e, m), 15, 'Read from data')
+    t.equal(popInt(e, m), 13, 'Read from data')
   }
   {
     const {memory: m, exports: e} = await runForth('create x 13 , does> @ 2 * ; x')
     const entries = parseDict(m)
-    t.equal(popInt(m), 26, 'Executed does')
+    t.equal(popInt(e, m), 26, 'Executed does')
   }
   {
     const {memory: m, exports: e} = await runForth(': dbl_const create , does> @ 2 * ; 13 dbl_const yy yy')
     const entries = parseDict(m)
-    t.equal(popInt(m), 26, 'Create/does within def')
+    t.equal(popInt(e, m), 26, 'Create/does within def')
   }
   {
     const {memory: m, exports: e} = await runForth('variable x 3 x ! x @')
-    t.equal(popInt(m), 3, 'Wrote and read var top level')
+    t.equal(popInt(e, m), 3, 'Wrote and read var top level')
   }
   {
     const {memory: m, exports: e} = await runForth('variable x : test 3 x ! x @ ; test')
-    t.equal(popInt(m), 3, 'Wrote and read var compiled')
+    t.equal(popInt(e, m), 3, 'Wrote and read var compiled')
   }
   {
     const {memory: m, exports: e} = await runForth(': +1 1 + ; : imm+ postpone +1 ; immediate 3 imm+')
-    t.equal(popInt(m), 4, 'immediate postpone works')
+    t.equal(popInt(e, m), 4, 'immediate postpone works')
   }
   {
     const {memory: m, exports: e} = await runForth(': +1 1 + ; : imm+ ]] +1 +1 [[ ; immediate 3 imm+')
-    t.equal(popInt(m), 5, 'immediate ]] [[ works')
+    t.equal(popInt(e, m), 5, 'immediate ]] [[ works')
   }
   {
     const {memory: m, exports: e} = await runForth("3 ' dup execute *")
-    t.equal(popInt(m), 9, 'quote and execute works')
+    t.equal(popInt(e, m), 9, 'quote and execute works')
   }
   {
     const {memory: m, exports: e} = await runForth("3 >r 4 r> -")
-    t.equal(popInt(m), 1, 'return stack')
+    t.equal(popInt(e, m), 1, 'return stack')
   }
   {
     const {memory: m, exports: e} = await runForth("1 2 2>r 0 2r> +")
-    t.equal(popInt(m), 3, 'return stack 2')
+    t.equal(popInt(e, m), 3, 'return stack 2')
   }
   {
     const {memory: m, exports: e} = await runForth("1 2 3 v swap * +")
-    t.equal(popInt(m), 5, 'v macro test')
+    t.equal(popInt(e, m), 5, 'v macro test')
   }
 }
 test()

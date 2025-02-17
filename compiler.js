@@ -72,23 +72,20 @@ const wasm = {
   endBlock: [0x0b],
   local_get: [0x20, 0x00],
   local_set: [0x21, 0x00],
+  global_get: n => [0x23, ...leb128(n)],
+  global_set: n => [0x24, ...leb128(n)],
 }
 
 const STACK_SIZE = 1024
 const RSTACK_SIZE = 256
-const DICT_START = STACK_SIZE + RSTACK_SIZE
+const DICT_START = STACK_SIZE + RSTACK_SIZE + 4
 
-const RSP_ADDR = RSTACK_SIZE
-const RSTACK_START = RSTACK_SIZE - 8
+const RSTACK_START = STACK_SIZE + RSTACK_SIZE
 
-const SP_ADDR = STACK_SIZE
-const STACK_START = STACK_SIZE - 8
+const STACK_START = STACK_SIZE
 
-function stackOps(spAddr) {
-  const readSp = [
-    ...i32.const(spAddr),
-    ...i32.load()
-  ]
+function stackOps(globalIdx) {
+  const readSp = wasm.global_get(globalIdx)
   const derefSp = offset => [
     ...readSp,
     ...i32.load(offset)
@@ -102,18 +99,15 @@ function stackOps(spAddr) {
   ]
   const writeNth = n => derefWriteSp(n * 4)
 
-  const setSp = val => [
-    ...i32.const(spAddr),
-    ...val,
-    ...i32.store(0)
-  ]
+  const setSp = wasm.global_set(globalIdx)
 
   // Positive means deeper into the stack
-  const moveSp = offset => setSp([
+  const moveSp = offset => [
     ...readSp,
     ...i32.const(offset),
     ...i32.add,
-  ])
+    ...setSp
+  ]
   const drop = n => moveSp(n * 4)
   const pushSp = [
     ...writeNth(0),
@@ -123,8 +117,8 @@ function stackOps(spAddr) {
     ...nth(1),
     ...moveSp(4),
   ]
-  const irPush = {ir: 'push', stack: spAddr}
-  const irPop = {ir: 'pop', stack: spAddr}
+  const irPush = {ir: 'push', stack: globalIdx}
+  const irPop = {ir: 'pop', stack: globalIdx}
   return {
     readSp,
     derefSp,
@@ -140,8 +134,8 @@ function stackOps(spAddr) {
     irPop
   }
 }
-const stack = stackOps(SP_ADDR)
-const rStack = stackOps(RSP_ADDR)
+const stack = stackOps(0)
+const rStack = stackOps(1)
 function binPrim(op) {
   return [
     stack.irPop,
@@ -363,23 +357,22 @@ function strBytes(str) {
 
 function printMem(m) {
   const buf = new Int32Array(m.buffer)
-  console.log('sp', buf[STACK_START/4 + 1])
   for (let i = 0; i < 10; i++) {
     console.log(i, buf[STACK_START/4 - i].toString(16))
   }
 }
 
-function pushInt(memory, n) {
+function pushInt(exports, memory, n) {
   const view = new Int32Array(memory.buffer)
-  const sp = view[SP_ADDR/4]  // divide by 4 bc Int32Array
-  view[SP_ADDR/4] = sp - 4
+  const sp = exports.sp.value
+  exports.sp.value = sp - 4
   view[sp/4] = n
 }
-function popInt(memory) {
+function popInt(exports, memory) {
   const view = new Int32Array(memory.buffer)
-  const sp = view[SP_ADDR/4] + 4
+  const sp = exports.sp.value + 4
   const val = view[sp/4]
-  view[SP_ADDR/4] = sp
+  exports.sp.value = sp
   return val
 }
 
@@ -440,17 +433,28 @@ function buildBinaryModule(funcs) {
     ...leb128(numFuncs),
   ])
 
+  // globals
+  sections.push([
+    0x06,
+    0x00,
+    0x02,
+    0x7F, 0x01, ...i32.const(STACK_START), 0x0B, // sp
+    0x7F, 0x01, ...i32.const(RSTACK_START), 0x0B, // rsp
+  ])
+
   // export section
   sections.push([
     0x07, // section code
     0, // section size
-    ...leb128(numFuncs), // num exports
+    ...leb128(numFuncs + 2), // num exports
     ...sortedFuncs.flatMap(({name, fnId}) => [
       name.length, // name length
-      ...Array.from(name).map(c => c.charCodeAt(0)), // name
+      ...Buffer.from(name), // name
       0x00, // export kind (func)
       ...leb128(fnId) // func index
-    ])
+    ]),
+    0x02, ...Buffer.from('sp'), 0x03, 0x00,
+    0x03, ...Buffer.from('rsp'), 0x03, 0x01,
   ])
 
   // element
@@ -500,6 +504,7 @@ function optimize(code) {
   while (i < code.length) {
     const cur = code[i]
     const next = code[i+1]
+    // TODO pop op push -> read op set
     if (isPushPopPair(cur, next)) {
       code.splice(i, 2)
     } else if (typeof cur === 'object') {
@@ -565,26 +570,30 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
   }
   const binary = buildBinaryModule(funcs)
   fs.writeFileSync('mod.wasm', binary)
+  let inst
   const _writeStreamWord = () => {
     const str = Buffer.from(tokStream.next(), 'utf-8')
-    const memAddr = popInt(mem)
+    const memAddr = popInt(inst.instance.exports, mem)
     const view32 = new Int32Array(mem.buffer)
     view32[memAddr/4] = str.length
     const view8 = new Uint8Array(mem.buffer)
     for (let i = 0; i < str.length; i++) {
       view8[memAddr + 4 + i] = str[i]
     }
-    pushInt(mem, 4 + str.length)
+    pushInt(inst.instance.exports, mem, 4 + str.length)
   }
   const dot = () => {
-    const n = popInt(mem)
-    console.log('dot:', n)
+    //const n = popInt(inst.instance.exports, mem)
+    const stackPos = (STACK_START - inst.instance.exports.sp.value)/4
+    console.log('stackp', stackPos)
+    printMem(mem)
+    //console.log(`dot: ${n} sp: ${stackPos}`)
   }
   const postponeWrapper = n => {
     postpone(n)
   }
   const compileXtWrapper = () => {
-    compileXt(popInt(mem))
+    compileXt(popInt(inst.instance.exports, mem))
   }
   const imports = { js: {
     mem,
@@ -594,13 +603,8 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     'compile,': compileXtWrapper,
     "'": quoteXt
   } };
-  return await WebAssembly.instantiate(binary, imports);
-}
-
-function initSp(memory) {
-  const view = new Int32Array(memory.buffer)
-  view[SP_ADDR/4] = STACK_START
-  view[RSP_ADDR/4] = RSTACK_START
+  inst = await WebAssembly.instantiate(binary, imports);
+  return inst
 }
 
 const definitionKeyword = {
@@ -660,7 +664,6 @@ async function runForth(source) {
     initial: 100,
     maximum: 100
   })
-  initSp(memory)
   let variableN = 0
   const tokStream = tokenStream(tokens)
   const lookupDefByFnId = id => {
@@ -728,8 +731,9 @@ async function runForth(source) {
       if (!def) {
         throw new Error('quote of unknown def ' + name)
       }
-      pushInt(memory, xtId(def))
+      pushInt(wasmInstance.instance.exports, memory, xtId(def))
     }
+    let oldExports = wasmInstance?.instance.exports
     wasmInstance = await compileDefs({
       defs,
       mem: memory,
@@ -738,6 +742,10 @@ async function runForth(source) {
       quoteXt,
       compileXt,
     })
+    if (oldExports) {
+      wasmInstance.instance.exports.sp.value = oldExports.sp.value
+      wasmInstance.instance.exports.rsp.value = oldExports.rsp.value
+    }
   }
   const runTopLevel = async () => {
     console.log('running topLevel', curDef.words)
@@ -793,7 +801,7 @@ async function runForth(source) {
       lastDef = curDef
       curDef = null
     } else if (tok === 'constant') {
-      const n = popInt(memory)
+      const n = popInt(wasmInstance.instance.exports, memory)
       const name = tokStream.next()
       defs[name] = {
         constant: n
@@ -804,7 +812,7 @@ async function runForth(source) {
       }
       lastDef.immediate = true
     } else if (tok === 'literal') {
-      const n = popInt(memory)
+      const n = popInt(wasmInstance.instance.exports, memory)
       curDef.words.push(n)
     } else if (tok === 'postpone') {
       const name = tokStream.next()
