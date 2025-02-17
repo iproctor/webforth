@@ -143,6 +143,10 @@ async function test() {
     t.equal(popInt(e, m), 4, 'immediate postpone works')
   }
   {
+    const {memory: m, exports: e} = await runForth(': myIf postpone if ; immediate 1 myIf 8 then')
+    t.equal(popInt(e, m), 8, 'postpone if works')
+  }
+  {
     const {memory: m, exports: e} = await runForth(': +1 1 + ; : imm+ ]] +1 +1 [[ ; immediate 3 imm+')
     t.equal(popInt(e, m), 5, 'immediate ]] [[ works')
   }
@@ -165,6 +169,10 @@ async function test() {
   {
     const {memory: m, exports: e} = await runForth("0 infloop 1 + dup 10 = if 0 if else break then then endinf")
     t.equal(popInt(e, m), 10, 'loop test')
+  }
+  {
+    const {memory: m, exports: e} = await runForth("0 10 0 do 1 + loop")
+    t.equal(popInt(e, m), 10, 'do loop test')
   }
 }
 test()

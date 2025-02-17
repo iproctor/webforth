@@ -199,7 +199,7 @@ const runtimeImports = [
   { module: 'js', name: 'mem', desc: [0x02, 0x00, 0x01]},
   { module: 'js', name: '_writeStreamWord', desc: [0x00, 0x00]},
   { module: 'js', name: '.', desc: [0x00, 0x00]},
-  { module: 'js', name: 'postpone', desc: [0x00, 0x01]}, // i32 -> ()
+  { module: 'js', name: 'postpone', desc: [0x00, 0x01]}, // i32, i32 -> ()
   { module: 'js', name: 'compile,', desc: [0x00, 0x00]},
   { module: 'js', name: "'", desc: [0x00, 0x00]},
 ]
@@ -336,6 +336,10 @@ const primFuncOps = {
     ...stack.moveSp(8),
   ],
   rdrop: rStack.drop(1),
+  rover: [
+    ...rStack.nth(2),
+    rStack.irPush(1),
+  ],
 
   // ( val addr -- )
   '!': [
@@ -484,8 +488,9 @@ function buildBinaryModule(funcs) {
     0x60, // func () -> ()
     0x00, // num params
     0x00, // num results
-    0x60, // func i32 -> ()
-    0x01, // num params
+    0x60, // func i32, i32 -> () used for postpone
+    0x02, // num params
+    0x7F, // i32
     0x7F, // i32
     0x00  // num results
   ]);
@@ -611,6 +616,8 @@ function optimize(code) {
 }
 
 const isPure = word => typeof word === 'number' || (typeof word === 'string' && pureOps[word])
+const isNumber = word => word.match(/^-?\d+$/)
+const parseNumber = word => parseInt(word)
 
 // Returns instance
 async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt}) {
@@ -618,7 +625,13 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     ...primFuncs
   }
   for (const [name, def] of Object.entries(defs)) {
-    if (!def.words) continue
+    if (!def.words) {
+      continue
+    }
+    if (def.topLevel && !def.compile) {
+      // Only want to compile the toplevel at the start of a new defn. Flag set earlier.
+      continue
+    }
 
     let code = []
     const words = [...def.words]
@@ -659,11 +672,18 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
         }
       } else if (typeof word === 'object') {
         if (word.postpone) {
-          const id = primNonFuncIds[word.postpone] ?? funcs[word.postpone]?.fnId
-          if (id === undefined) {
-            throw new Error('Unknown postpone word')
+          let type = 0, id = 0
+          if (isNumber(word.postpone)) {
+            id = parseNumber(word.postpone)
+          } else {
+            type = 1
+            id = primNonFuncIds[word.postpone] ?? funcs[word.postpone]?.fnId
+            if (id === undefined) {
+              throw new Error('Unknown postpone word: ' + word.postpone)
+            }
           }
           code.push(
+            ...i32.const(type),
             ...i32.const(id),
             ...wasm.call(importToIndex.postpone)
           )
@@ -742,9 +762,6 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     printMem(mem)
     //console.log(`dot: ${n} sp: ${stackPos}`)
   }
-  const postponeWrapper = n => {
-    postpone(n)
-  }
   const compileXtWrapper = () => {
     compileXt(popInt(inst.instance.exports, mem))
   }
@@ -752,7 +769,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     mem,
     _writeStreamWord,
     '.': dot,
-    postpone: postponeWrapper,
+    postpone,
     'compile,': compileXtWrapper,
     "'": quoteXt
   } };
@@ -852,13 +869,15 @@ async function runForth(source) {
     }
   }
   const compile = async () => {
-    const postpone = async fnId => {
+    const postpone = async (type, fnId) => {
       let activeDef = doesDef || curDef
       if (!activeDef) {
         throw new Error('postponing outside of compilation')
       }
       let name, fnDef = {}
-      if (fnId < 0) {
+      if (type === 0) { // number
+        name = fnId
+      } else if (fnId < 0) {
         for (const k in primNonFuncIds) {
           if (primNonFuncIds[k] === fnId) {
             name = k
@@ -913,6 +932,7 @@ async function runForth(source) {
   }
   const runTopLevel = async () => {
     console.log('running topLevel', curDef.words)
+    curDef.compile = true
     await compile()
     wasmInstance.instance.exports[curDef.name]()
     curDef = null
@@ -997,8 +1017,8 @@ async function runForth(source) {
           immediate: false
         }
       }
-      if (tok.match(/^-?\d+$/)) {
-        const n = parseInt(tok)
+      if (isNumber(tok)) {
+        const n = parseNumber(tok)
         activeDef.words.push(n)
       } else {
         const wordDef = defs[tok] ?? prims[tok]
