@@ -38,8 +38,12 @@
 
 : do ]] 2>r infloop [[ ; immediate
 
-: loop ]]
-    r> 1 + dup >r
+
+: +loop ]]
+    r> + dup >r
     rover r> = if break then
     endinf
+    rdrop rdrop
     [[ ; immediate
+
+: loop ]] 1 +loop [[ ; immediate

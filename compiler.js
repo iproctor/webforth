@@ -851,7 +851,7 @@ async function runForth(source) {
   const compileWord = async (activeDef, name, wordDef) => {
     if (wordDef.immediate) {
       // eval this word
-      if (!wasmInstance?.exports?.[name]) {
+      if (!wasmInstance?.instance.exports?.[name]) {
         // Need to compile
         await compile()
       }
