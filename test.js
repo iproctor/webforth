@@ -148,5 +148,9 @@ async function test() {
     const {memory: m, exports: e} = await runForth("3 ' dup execute *")
     t.equal(popInt(m), 9, 'quote and execute works')
   }
+  {
+    const {memory: m, exports: e} = await runForth("3 >r 4 r> -")
+    t.equal(popInt(m), 1, 'return stack')
+  }
 }
 test()

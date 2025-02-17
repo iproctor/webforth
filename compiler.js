@@ -72,61 +72,82 @@ const wasm = {
   endBlock: [0x0b],
 }
 
-const DICT_START = 1024
-const SP_ADDR = DICT_START - 4
-const STACK_START = DICT_START - 8
+const STACK_SIZE = 1024
+const RSTACK_SIZE = 256
+const DICT_START = STACK_SIZE + RSTACK_SIZE
 
-const readSp = [
-  ...i32.const(SP_ADDR),
-  ...i32.load()
-]
-const derefSp = offset => [
-  ...readSp,
-  ...i32.load(offset)
-]
-const nth = n => derefSp(n * 4)
-const derefWriteSp = (offset, val) => [
-  ...readSp,
-  ...val,
-  ...i32.store(offset)
-]
-const writeNth = (n, val) => derefWriteSp(n * 4, val)
+const RSP_ADDR = RSTACK_SIZE
+const RSTACK_START = RSTACK_SIZE - 8
 
-const setSp = val => [
-  ...i32.const(SP_ADDR),
-  ...val,
-  ...i32.store(0)
-]
+const SP_ADDR = STACK_SIZE
+const STACK_START = STACK_SIZE - 8
 
-// Positive means deeper into the stack
-const moveSp = offset => setSp([
-  ...readSp,
-  ...i32.const(offset),
-  ...i32.add,
-])
-const drop = n => moveSp(n * 4)
-const pushSp = val => [
-  ...writeNth(0, val),
-  ...moveSp(-4),
-]
-const popSp = [
-  ...nth(1),
-  ...moveSp(4),
-]
+function stackOps(spAddr) {
+  const readSp = [
+    ...i32.const(spAddr),
+    ...i32.load()
+  ]
+  const derefSp = offset => [
+    ...readSp,
+    ...i32.load(offset)
+  ]
+  const nth = n => derefSp(n * 4)
+  const derefWriteSp = (offset, val) => [
+    ...readSp,
+    ...val,
+    ...i32.store(offset)
+  ]
+  const writeNth = (n, val) => derefWriteSp(n * 4, val)
 
+  const setSp = val => [
+    ...i32.const(spAddr),
+    ...val,
+    ...i32.store(0)
+  ]
+
+  // Positive means deeper into the stack
+  const moveSp = offset => setSp([
+    ...readSp,
+    ...i32.const(offset),
+    ...i32.add,
+  ])
+  const drop = n => moveSp(n * 4)
+  const pushSp = val => [
+    ...writeNth(0, val),
+    ...moveSp(-4),
+  ]
+  const popSp = [
+    ...nth(1),
+    ...moveSp(4),
+  ]
+  return {
+    readSp,
+    derefSp,
+    nth,
+    derefWriteSp,
+    writeNth,
+    setSp,
+    moveSp,
+    drop,
+    pushSp,
+    popSp
+  }
+}
+const stack = stackOps(SP_ADDR)
+const rStack = stackOps(RSP_ADDR)
 function binPrim(op) {
   return [
-    ...writeNth(2, [
-      ...nth(1),
-      ...nth(2),
+    ...stack.writeNth(2, [
+      ...stack.nth(2),
+      ...stack.nth(1),
       ...op,
     ]),
-    ...drop(1),
+    ...stack.drop(1),
   ]
 }
 function unPrim(op) {
-  return writeNth(1, [
-    ...nth(1),
+  return stack.writeNth(1, [
+    ...stack.nth(1),
     ...op
   ])
 }
@@ -137,36 +158,40 @@ const runtimeImports = [
   { module: 'js', name: '.', desc: [0x00, 0x00]},
   { module: 'js', name: 'postpone', desc: [0x00, 0x01]}, // i32 -> ()
   { module: 'js', name: 'compile,', desc: [0x00, 0x00]},
+  { module: 'js', name: "'", desc: [0x00, 0x00]},
 ]
 const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
 const nImportFunctions = importFunctions.length
 
 const primOps = {
   // ( n -- )
-  dup: pushSp(nth(1)),
+  dup: stack.pushSp(stack.nth(1)),
 
   // ( a b -- b a )
   swap: [
-    ...readSp,
-    ...nth(1),
-    ...readSp,
-    ...nth(2),
+    ...stack.readSp,
+    ...stack.nth(1),
+    ...stack.readSp,
+    ...stack.nth(2),
     ...i32.store(4),
     ...i32.store(8),
   ],
 
   // ( a b c -- b c a )
   rot: [
-    ...readSp,
-    ...nth(1), // c
-    ...readSp,
-    ...nth(2), // b
-    ...readSp,
-    ...nth(3), /// a
+    ...stack.readSp,
+    ...stack.nth(1), // c
+    ...stack.readSp,
+    ...stack.nth(2), // b
+    ...stack.readSp,
+    ...stack.nth(3), /// a
     ...i32.store(4),
     ...i32.store(12),
     ...i32.store(8),
   ],
+
+  '>r': rStack.pushSp(stack.popSp),
+  'r>': stack.pushSp(rStack.popSp),
 
   // ( a b -- a+b )
   '+': binPrim(i32.add),
@@ -210,25 +235,25 @@ const primOps = {
 
   // ( val addr -- )
   '!': [
-    ...nth(1), // addr
-    ...nth(2), // val
+    ...stack.nth(1), // addr
+    ...stack.nth(2), // val
     ...i32.store(0), // lets assume we are using real memory addresses without VAR offset
-    ...drop(2)
+    ...stack.drop(2)
   ],
 
-  '@': writeNth(1, [
-    ...nth(1), // addr
+  '@': stack.writeNth(1, [
+    ...stack.nth(1), // addr
     ...i32.load(0),
   ]),
 
   // ( a -- )
-  drop: drop(1),
+  drop: stack.drop(1),
 
   // ( a b -- a b a )
-  over: pushSp(nth(2)),
+  over: stack.pushSp(stack.nth(2)),
 
   execute: [
-    ...popSp,
+    ...stack.popSp,
     ...wasm.call_indirect
   ]
 }
@@ -246,13 +271,13 @@ const primFuncs = {}
 const prims = {
   ...primOps,
   if: [
-    ...nth(1),
-    ...drop(1),
+    ...stack.nth(1),
+    ...stack.drop(1),
     ...wasm.ifEmpty,
   ],
   else: wasm.else,
   then: wasm.endBlock,
-  dict_start: pushSp(i32.const(DICT_START)),
+  dict_start: stack.pushSp(i32.const(DICT_START)),
 }
 const importToIndex = {}
 {
@@ -391,7 +416,7 @@ function buildBinaryModule(funcs) {
 }
 
 // Returns instance
-async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
+async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt}) {
   const funcs = {
     ...primFuncs
   }
@@ -402,7 +427,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
     for (const word of def.words) {
       if (typeof word === 'number') {
         // push n to stack
-        code.push(...pushSp(i32.const(word),))
+        code.push(...stack.pushSp(i32.const(word),))
       } else if (typeof word === 'object') {
         if (word.postpone) {
           const def = funcs[word.postpone]
@@ -421,7 +446,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
           // TODO could inline small words
           const wordDef = defs[word]
           if (funcs[word].code.length < INLINE_THRESH) {
-            code.push(...pushSp(i32.const(n)))
+            code.push(...stack.pushSp(i32.const(n)))
           } else {
             code.push(...wasm.call(funcs[word].fnId))
           }
@@ -462,7 +487,8 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
     _writeStreamWord,
     '.': dot,
     postpone: postponeWrapper,
-    'compile,': compileXtWrapper
+    'compile,': compileXtWrapper,
+    "'": quoteXt
   } };
   return await WebAssembly.instantiate(binary, imports);
 }
@@ -470,6 +496,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt}) {
 function initSp(memory) {
   const view = new Int32Array(memory.buffer)
   view[SP_ADDR/4] = STACK_START
+  view[RSP_ADDR/4] = RSTACK_START
 }
 
 const definitionKeyword = {
@@ -524,7 +551,7 @@ async function runForth(source) {
   let lastDef
   let fnId = Object.keys(primFuncs).length + nImportFunctions
   let wasmInstance
-  const createLike = new Set(['create'])
+  const createLike = new Set(['create', "'"])
   const memory = new WebAssembly.Memory({
     initial: 100,
     maximum: 100
@@ -587,11 +614,24 @@ async function runForth(source) {
       }
       await compileWord(activeDef, fnDef.name, fnDef)
     }
+    const quoteXt = () => {
+      let activeDef = doesDef || curDef
+      if (!activeDef) {
+        throw new Error('compileXt outside of compilation')
+      }
+      const name = tokStream.next()
+      const def = defs[name] ?? primFuncs[name]
+      if (!def) {
+        throw new Error('quote of unknown def ' + name)
+      }
+      pushInt(memory, xtId(def))
+    }
     wasmInstance = await compileDefs({
       defs,
       mem: memory,
       tokStream,
       postpone,
+      quoteXt,
       compileXt,
     })
   }
@@ -669,13 +709,6 @@ async function runForth(source) {
       for (let next = tokStream.next(); next !== '[['; next = tokStream.next()) {
         curDef.words.push({postpone: next})
       }
-    } else if (tok === "'") {
-      const name = tokStream.next()
-      const def = defs[name] ?? primFuncs[name]
-      if (!def) {
-        throw new Error('quote of unknown def ' + name)
-      }
-      curDef.words.push(xtId(def))
     } else {
       let activeDef = doesDef || curDef
       if (!activeDef) {
