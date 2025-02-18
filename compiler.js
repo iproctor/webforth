@@ -398,7 +398,7 @@ const controlInstructions = {
     ...wasm.block,
     ...wasm.loop,
   ],
-  break: wasm.br(1),
+  leave: wasm.br(1),
   continue: wasm.br(0),
   again: [
     ...wasm.br(0),
@@ -412,7 +412,7 @@ const primNonFuncOps = {
   then: [{ir: 'then'}],
 
   begin: [{ir: 'begin'}],
-  break: [{ir: 'break'}],
+  leave: [{ir: 'leave'}],
   continue: [{ir: 'continue'}],
   again: [{ir: 'again'}],
 }
@@ -722,7 +722,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
       } else if (inst.ir === 'begin') {
         ifStack.push(0)
         newCode.push(...controlInstructions.begin)
-      } else if (inst.ir === 'break') {
+      } else if (inst.ir === 'leave') {
         newCode.push(...wasm.br(1 + ifStack[ifStack.length - 1]))
       } else if (inst.ir === 'continue') {
         newCode.push(...wasm.br(ifStack[ifStack.length - 1]))

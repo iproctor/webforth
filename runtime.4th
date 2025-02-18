@@ -31,6 +31,10 @@
   dup _dict_entry_end rot swap !
   dup @ 4 + swap ! ;
 
+: here _dict_current _dict_entry_end ;
+
+: allot _dict_current dup @ rot + swap ! ;
+
 : variable create 0 , ;
 
 : v postpone >r ' compile, postpone r> ; immediate
@@ -40,11 +44,13 @@
 
 : +loop ]]
     r> + dup >r
-    rover r> = if break then
+    rover r> = if leave then
     again
     rdrop rdrop
     [[ ; immediate
 
 : loop ]] 1 +loop [[ ; immediate
 
-: until ]] if break then again [[ ; immediate
+: until ]] if leave then again [[ ; immediate
+
+: while ]] if else continue then [[ ; immediate

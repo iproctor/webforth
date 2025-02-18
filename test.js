@@ -126,6 +126,10 @@ async function test() {
     t.equal(popInt(e, m), 26, 'Executed does')
   }
   {
+    const {memory: m, exports: e} = await runForth('create x here 32 allot here -')
+    t.equal(popInt(e, m), -32, 'Executed allot')
+  }
+  {
     const {memory: m, exports: e} = await runForth(': dbl_const create , does> @ 2 * ; 13 dbl_const yy yy')
     const entries = parseDict(m)
     t.equal(popInt(e, m), 26, 'Create/does within def')
@@ -167,7 +171,7 @@ async function test() {
     t.equal(popInt(e, m), 5, 'v macro test')
   }
   {
-    const {memory: m, exports: e} = await runForth("0 begin 1 + dup 10 = if 0 if else break then then again")
+    const {memory: m, exports: e} = await runForth("0 begin 1 + dup 10 = if 0 if else leave then then again")
     t.equal(popInt(e, m), 10, 'loop test')
   }
   {
