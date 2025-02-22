@@ -3,7 +3,6 @@ const fs = require('fs')
 const runtime = fs.readFileSync('runtime.4th')
 
 const INLINE_THRESH = 5
-const N_LOCALS = 2
 
 function leb128(n) {
   return leb.signed.encode(n)
@@ -64,6 +63,46 @@ const i32 = {
   load16_u: [0x2f], // load 16 bits as unsigned
   store8: [0x3a],   // store 8 bits
   store16: [0x3b],  // store 16 bits
+
+  numtype: 0x7F,
+  N_LOCALS: 2
+}
+const f64 = {
+  const: n => [0x44, ...new Float64Array([n]).buffer], // Push f64 constant
+  add: [0xa0],    // f64.add
+  sub: [0xa1],    // f64.sub
+  mul: [0xa2],    // f64.mul
+  div: [0xa3],    // f64.div
+  sqrt: [0x9f],   // f64.sqrt
+  min: [0xa4],    // f64.min
+  max: [0xa5],    // f64.max
+  ceil: [0x9b],   // f64.ceil
+  floor: [0x9c],  // f64.floor
+  trunc: [0x9d],  // f64.trunc
+  nearest: [0x9e],// f64.nearest
+  abs: [0x99],    // f64.abs
+  neg: [0x9a],    // f64.neg
+  copysign: [0xa6],// f64.copysign
+
+  // Comparisons
+  eq: [0x61],     // f64.eq
+  ne: [0x62],     // f64.ne
+  lt: [0x63],     // f64.lt
+  gt: [0x64],     // f64.gt
+  le: [0x65],     // f64.le
+  ge: [0x66],     // f64.ge
+
+  // Conversions
+  convert_i32_s: [0xb7], // f64.convert_i32_s
+  convert_i32_u: [0xb8], // f64.convert_i32_u
+  promote_f32: [0xbb],   // f64.promote_f32
+
+  // Memory operations
+  store: addr => [0x39, 0x03, ...leb128(addr)],
+  load: addr => [0x2b, 0x03, ...leb128(addr)],
+
+  numtype: 0x7C,
+  N_LOCALS: 1
 }
 const wasm = {
   call: idx => [0x10, ...leb128(idx)],
@@ -83,26 +122,30 @@ const wasm = {
 
 const STACK_SIZE = 1024
 const RSTACK_SIZE = 256
-const DICT_START = STACK_SIZE + RSTACK_SIZE + 4
-
-const RSTACK_START = STACK_SIZE + RSTACK_SIZE
+const FSTACK_SIZE = 256
 
 const STACK_START = STACK_SIZE
+const RSTACK_START = STACK_START + RSTACK_SIZE
+const FSTACK_START = RSTACK_START + FSTACK_SIZE
+const DICT_START = FSTACK_START + 4
 
-function stackOps(globalIdx) {
+const floatStackIndex = 2
+
+function stackOps(globalIdx, opset = i32, cellsize=4) {
+  const localOffset = globalIdx === floatStackIndex ? 2 : 0
   const readSp = wasm.global_get(globalIdx)
   const derefSp = offset => [
     ...readSp,
-    ...i32.load(offset)
+    ...opset.load(offset)
   ]
-  const nth = n => derefSp(n * 4)
+  const nth = n => derefSp(n * cellsize)
   const derefWriteSp = (offset) => [
-    ...wasm.local_set(0), // store v
+    ...wasm.local_set(localOffset), // store v
     ...readSp,
-    ...wasm.local_get(0), // push v
-    ...i32.store(offset)
+    ...wasm.local_get(localOffset), // push v
+    ...opset.store(offset)
   ]
-  const writeNth = n => derefWriteSp(n * 4)
+  const writeNth = n => derefWriteSp(n * cellsize)
 
   const setSp = wasm.global_set(globalIdx)
 
@@ -113,10 +156,10 @@ function stackOps(globalIdx) {
     ...i32.add,
     ...setSp
   ]
-  const drop = n => moveSp(n * 4)
+  const drop = n => moveSp(n * cellsize)
   const pushSp = n => {
     const ret = [
-      ...moveSp(n * -4)
+      ...moveSp(n * -cellsize)
     ]
     for (let i = 0; i < n; i++) {
       ret.push(...writeNth(i+1))
@@ -128,21 +171,22 @@ function stackOps(globalIdx) {
     for (let i = 0; i < n; i++) {
       ret.push(...nth(n - i))
     }
-    ret.push(...moveSp(n * 4))
+    ret.push(...moveSp(n * cellsize))
     return ret
   }
-  const irPush = n => ({ir: 'push', stack: globalIdx, n})
-  const irPop = n => ({ir: 'pop', stack: globalIdx, n})
+  const args = [globalIdx, opset, cellsize]
+  const irPush = n => ({ir: 'push', stack: args, n})
+  const irPop = n => ({ir: 'pop', stack: args, n})
   const mergePushPop = ({n: pushN}, {n: popN}) => {
     if (pushN === popN) {
       return []
     }
-    if (pushN < popN && pushN <= N_LOCALS) {
+    if (pushN < popN && pushN <= opset.N_LOCALS) {
       // More needing to be popped.
       const ret = []
       // Save pushed to locals
       for (let i = 0; i < pushN; i++) {
-        ret.push(...wasm.local_set(i)) // local_set 0
+        ret.push(...wasm.local_set(localOffset + i)) // local_set 0
       }
       // Load up bottom values into stack
       for (let i = popN - pushN; i >= 1; i--) {
@@ -150,10 +194,10 @@ function stackOps(globalIdx) {
       }
       // Restore top values
       for (let i = pushN - 1; i >= 0; i--) {
-        ret.push(...wasm.local_get(i))
+        ret.push(...wasm.local_get(localOffset + i))
       }
       // Move stack pointer
-      ret.push(...moveSp(4*(popN - pushN)))
+      ret.push(...moveSp(cellsize*(popN - pushN)))
       return ret
     }
     // Otherwise just emit the full push and the full pop
@@ -180,18 +224,19 @@ function stackOps(globalIdx) {
 }
 const stack = stackOps(0)
 const rStack = stackOps(1)
-function binPrim(op) {
+const fStack = stackOps(floatStackIndex, f64, 8)
+function binPrim(op, stack, outStack) {
   return [
     stack.irPop(2),
     ...op,
-    stack.irPush(1)
+    (outStack ?? stack).irPush(1)
   ]
 }
-function unPrim(op) {
+function unPrim(op, stack, outStack) {
   return [
     stack.irPop(1),
     ...op,
-    stack.irPush(1)
+    (outStack ?? stack).irPush(1)
   ]
 }
 
@@ -216,7 +261,7 @@ const runtimeImports = [
 const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
 const nImportFunctions = importFunctions.length
 
-const binOps = {
+const i32BinOps = {
   '+': i32.add,
 
   // ( a b -- a-b
@@ -249,12 +294,41 @@ const binOps = {
   'mod': i32.rem_s,
   'umod': i32.rem_u,
 }
+const f64BinOps = {
+   // Floating point
+  'f+': f64.add,
+  'f-': f64.sub,
+  'f*': f64.mul,
+  'f/': f64.div,
+  'fmin': f64.min,
+  'fmax': f64.max,
+}
+const f64ToI32BinOps = {
+  'f=': f64.eq,
+  'f<>': f64.ne,
+  'f<': f64.lt,
+  'f>': f64.gt,
+  'f<=': f64.le,
+  'f>=': f64.ge,
+}
 
-const unaryOps = {
+const i32UnaryOps = {
   // bit counting (unary prims)
   'clz': i32.clz,
   'ctz': i32.ctz,
   'popcnt': i32.popcnt,
+}
+const f64UnaryOps = {
+  'fsqrt': f64.sqrt,
+  'fabs': f64.abs,
+  'fnegate': f64.neg,
+  'fceil': f64.ceil,
+  'ffloor': f64.floor,
+  'ftrunc': f64.trunc,
+  'fround': f64.nearest
+}
+const i32ToF64UnaryOps = {
+  's>f': f64.convert_i32_s
 }
 
 const pureOps = {
@@ -345,6 +419,10 @@ const primFuncOps = {
     ...rStack.writeNth(1),
     ...stack.moveSp(8),
   ],
+  'r@': [
+    ...rStack.nth(1),
+    stack.irPush(1)
+  ],
   rdrop: rStack.drop(1),
   rover: [
     ...rStack.nth(2),
@@ -379,13 +457,29 @@ const primFuncOps = {
     ...wasm.call_indirect
   ]
 }
-for (const k in binOps) {
-  primFuncOps[k] = binPrim(binOps[k])
-  pureOps[k] = [binOps[k], 2, 1]
+for (const k in i32BinOps) {
+  primFuncOps[k] = binPrim(i32BinOps[k], stack)
+  pureOps[k] = [i32BinOps[k], 2, 1, false]
 }
-for (const k in unaryOps) {
-  primFuncOps[k] = unPrim(unaryOps[k])
-  pureOps[k] = [unaryOps[k], 1, 1]
+for (const k in f64BinOps) {
+  primFuncOps[k] = binPrim(f64BinOps[k], fStack)
+  //pureOps[k] = [f64BinOps[k], 2, 1, true]
+}
+for (const k in f64ToI32BinOps) {
+  primFuncOps[k] = binPrim(f64ToI32BinOps[k], fStack, stack)
+  //pureOps[k] = [f64BinOps[k], 2, 1, true]
+}
+for (const k in i32UnaryOps) {
+  primFuncOps[k] = unPrim(i32UnaryOps[k], stack)
+  pureOps[k] = [i32UnaryOps[k], 1, 1, false]
+}
+for (const k in f64UnaryOps) {
+  primFuncOps[k] = unPrim(f64UnaryOps[k], fStack)
+  //pureOps[k] = [f64UnaryOps[k], 1, 1, true]
+}
+for (const k in i32ToF64UnaryOps) {
+  primFuncOps[k] = unPrim(i32ToF64UnaryOps[k], stack, fStack)
+  //pureOps[k] = [f64UnaryOps[k], 1, 1, true]
 }
 const controlInstructions = {
   if: [
@@ -550,16 +644,17 @@ function buildBinaryModule(funcs) {
   sections.push([
     0x06,
     0x00,
-    0x02,
+    0x03,
     0x7F, 0x01, ...i32.const(STACK_START), 0x0B, // sp
     0x7F, 0x01, ...i32.const(RSTACK_START), 0x0B, // rsp
+    0x7F, 0x01, ...i32.const(FSTACK_START), 0x0B, // fsp
   ])
 
   // export section
   sections.push([
     0x07, // section code
     0, // section size
-    ...leb128(numFuncs + 2), // num exports
+    ...leb128(numFuncs + 3), // num exports
     ...sortedFuncs.flatMap(({name, fnId}) => [
       name.length, // name length
       ...Buffer.from(name), // name
@@ -568,6 +663,7 @@ function buildBinaryModule(funcs) {
     ]),
     0x02, ...Buffer.from('sp'), 0x03, 0x00,
     0x03, ...Buffer.from('rsp'), 0x03, 0x01,
+    0x03, ...Buffer.from('fsp'), 0x03, 0x02,
   ])
 
   // element
@@ -587,8 +683,10 @@ function buildBinaryModule(funcs) {
     0, // size
     numFuncs, // count
     ...sortedFuncs.flatMap(f => [
-      ...leb128(f.code.length + 2 + 2), // size prefix for each function
-      1, ...leb128(N_LOCALS), 0x7F,
+      ...leb128(f.code.length + 2 + 2 + 2), // size prefix for each function
+      2,
+      ...leb128(i32.N_LOCALS), i32.numtype,
+      ...leb128(f64.N_LOCALS), f64.numtype,
       ...f.code,
       0x0b
     ])
@@ -609,7 +707,7 @@ function isPushPopPair(i1, i2) {
   if (typeof i1 !== 'object' || typeof i2 !== 'object') {
     return
   }
-  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack === i2.stack && i2.n - i1.n <= N_LOCALS
+  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack[0] === i2.stack[0] && i2.n - i1.n <= i1.stack[1].N_LOCALS
 }
 
 function optimize(code) {
@@ -619,13 +717,13 @@ function optimize(code) {
     const next = code[i+1]
     // TODO pop op push -> read op set
     if (isPushPopPair(cur, next)) {
-      const transfer = stackOps(cur.stack).mergePushPop(cur, next)
+      const transfer = stackOps(...cur.stack).mergePushPop(cur, next)
       code.splice(i, 2, ...transfer)
     } else if (typeof cur === 'object') {
       if (cur.ir === 'pop') {
-        code.splice(i, 1, ...stackOps(cur.stack).popSp(cur.n))
+        code.splice(i, 1, ...stackOps(...cur.stack).popSp(cur.n))
       } else if (cur.ir === 'push') {
-        code.splice(i, 1, ...stackOps(cur.stack).pushSp(cur.n))
+        code.splice(i, 1, ...stackOps(...cur.stack).pushSp(cur.n))
       }
     } else {
       i++
