@@ -155,6 +155,10 @@ async function test() {
     t.equal(popInt(e, m), 5, 'immediate ]] [[ works')
   }
   {
+    const {memory: m, exports: e} = await runForth(': foo [[ 3 3 * ]] literal ; foo')
+    t.equal(popInt(e, m), 9, 'inline [[ ]] works')
+  }
+  {
     const {memory: m, exports: e} = await runForth("3 ' dup execute *")
     t.equal(popInt(e, m), 9, 'quote and execute works')
   }
@@ -177,6 +181,14 @@ async function test() {
   {
     const {memory: m, exports: e} = await runForth("0 10 0 do 1 + loop")
     t.equal(popInt(e, m), 10, 'do loop test')
+  }
+  {
+    const {memory: m, exports: e} = await runForth("8 : foo literal 1 + ; foo")
+    t.equal(popInt(e, m), 9, 'literal test')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('"abcdef" dup v type')
+    t.equal(popInt(e, m), 6, 'literal str')
   }
 }
 test()

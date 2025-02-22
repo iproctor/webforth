@@ -195,13 +195,23 @@ function unPrim(op) {
   ]
 }
 
+let typeI = 0
+const types = {
+  void_to_void: {desc: [0x00, typeI++], pop: 0, push: 0},
+  i32_to_i32: {desc: [0x00, typeI++], pop: 1, push: 1},
+  i32_i32_to_void: {desc: [0x00, typeI++], pop: 2, push: 0},
+  i32_to_void: {desc: [0x00, typeI++], pop: 1, push: 0},
+  void_to_i32: {desc: [0x00, typeI++], pop: 0, push: 1},
+}
+
 const runtimeImports = [
   { module: 'js', name: 'mem', desc: [0x02, 0x00, 0x01]},
-  { module: 'js', name: '_writeStreamWord', desc: [0x00, 0x00]},
-  { module: 'js', name: '.', desc: [0x00, 0x00]},
-  { module: 'js', name: 'postpone', desc: [0x00, 0x01]}, // i32, i32 -> ()
-  { module: 'js', name: 'compile,', desc: [0x00, 0x00]},
-  { module: 'js', name: "'", desc: [0x00, 0x00]},
+  { module: 'js', name: '_writeStreamWord', ...types.i32_to_i32},
+  { module: 'js', name: '.', ...types.void_to_void},
+  { module: 'js', name: 'postpone', ...types.i32_i32_to_void},
+  { module: 'js', name: 'compile,', ...types.i32_to_void},
+  { module: 'js', name: "'", ...types.void_to_i32},
+  { module: 'js', name: "type", ...types.i32_i32_to_void},
 ]
 const importFunctions = runtimeImports.filter(m => m.desc[0] === 0)
 const nImportFunctions = importFunctions.length
@@ -377,17 +387,6 @@ for (const k in unaryOps) {
   primFuncOps[k] = unPrim(unaryOps[k])
   pureOps[k] = [unaryOps[k], 1, 1]
 }
-const primFuncs = {}
-{
-  let pk = nImportFunctions
-  for (const k in primFuncOps) {
-    primFuncs[k] = {
-      name: k,
-      fnId: pk++,
-      code: optimize([...primFuncOps[k]])
-    }
-  }
-}
 const controlInstructions = {
   if: [
     stack.irPop(1),
@@ -423,6 +422,25 @@ const primNonFuncIds = {}
     primNonFuncIds[k] = id--
   }
 }
+const importToIndex = {}
+{
+  let i = 0
+  for (const f of importFunctions) {
+    const {pop = 0, push = 0, name} = f
+    importToIndex[f.name] = i
+    const r = []
+    if (pop > 0) {
+      r.push(stack.irPop(pop))
+    }
+    r.push(...wasm.call(i))
+    if (push > 0) {
+      r.push(stack.irPush(push))
+    }
+    pureOps[f.name] = [wasm.call(i), pop, push]
+    primFuncOps[f.name] = r
+    i++
+  }
+}
 const prims = {
   ...primFuncOps,
   ...primNonFuncOps,
@@ -431,13 +449,15 @@ const prims = {
     stack.irPush(1)
   ],
 }
-const importToIndex = {}
+const primFuncs = {}
 {
-  let i = 0
-  for (const f of importFunctions) {
-    importToIndex[f.name] = i
-    prims[f.name] = wasm.call(i)
-    i++
+  let pk = nImportFunctions
+  for (const k in primFuncOps) {
+    primFuncs[k] = {
+      name: k,
+      fnId: pk++,
+      code: optimize([...primFuncOps[k]])
+    }
   }
 }
 
@@ -484,15 +504,14 @@ function buildBinaryModule(funcs) {
   sections.push([
     0x01, // section code
     0x00, // section size
-    0x02, // num types
-    0x60, // func () -> ()
-    0x00, // num params
-    0x00, // num results
-    0x60, // func i32, i32 -> () used for postpone
-    0x02, // num params
-    0x7F, // i32
-    0x7F, // i32
-    0x00  // num results
+    ...leb128(Object.keys(types).length), // num types
+    ...Object.values(types).flatMap(type => [
+      0x60,
+      ...leb128(type.pop),
+      ...Array(type.pop).fill(0x7F),
+      ...leb128(type.push),
+      ...Array(type.push).fill(0x7F),
+    ])
   ]);
 
   // import section (memory)
@@ -632,17 +651,23 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
       // Only want to compile the toplevel at the start of a new defn. Flag set earlier.
       continue
     }
+    let p = () => null
+    if (name== 'create') {
+      //p = console.log
+    }
 
     let code = []
     const words = [...def.words]
     for (let i = 0; i < words.length; i++) {
       let word = words[i]
+      p(word)
       if (isPure(word)) {
         const pureSeq = []
         let maxStackDepth = 0
         let curStackDepth = 0
 
         while (true) {
+          p('pure', word)
           if (typeof word === 'number') {
             pureSeq.push(...i32.const(word))
             curStackDepth--
@@ -664,10 +689,12 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
         }
         const toCopy = maxStackDepth - curStackDepth
         if (maxStackDepth > 0) {
+          p('pure pop', maxStackDepth)
           code.push(stack.irPop(maxStackDepth))
         }
         code.push(...pureSeq)
         if (toCopy > 0) {
+          p('pure push', toCopy)
           code.push(stack.irPush(toCopy))
         }
       } else if (typeof word === 'object') {
@@ -691,16 +718,20 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
       } else {
         if (prims[word]) {
           // Inline prims
+          p('prim', word)
           code.push(...prims[word])
         } else if (importToIndex[word] !== undefined) {
+          p('import', word)
           code.push(...wasm.call(importToIndex[word]))
         } else {
           const wordDef = defs[word]
           if (wordDef.words.length < INLINE_THRESH) {
+            p('inline', word)
             words.splice(i, 1, ...wordDef.words)
             i--
             continue
           } else {
+            p('call', word)
             code.push(...wasm.call(funcs[word].fnId))
           }
         }
@@ -744,16 +775,17 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
   const binary = buildBinaryModule(funcs)
   fs.writeFileSync('mod.wasm', binary)
   let inst
-  const _writeStreamWord = () => {
-    const str = Buffer.from(tokStream.next(), 'utf-8')
-    const memAddr = popInt(inst.instance.exports, mem)
+  const _writeStreamWord = memAddr => {
+    const str = Buffer.from(tokStream.next().word, 'utf-8')
+    //const memAddr = popInt(inst.instance.exports, mem)
     const view32 = new Int32Array(mem.buffer)
     view32[memAddr/4] = str.length
     const view8 = new Uint8Array(mem.buffer)
     for (let i = 0; i < str.length; i++) {
       view8[memAddr + 4 + i] = str[i]
     }
-    pushInt(inst.instance.exports, mem, 4 + str.length)
+    return 4 + str.length
+    //pushInt(inst.instance.exports, mem, 4 + str.length)
   }
   const dot = () => {
     //const n = popInt(inst.instance.exports, mem)
@@ -762,16 +794,19 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     printMem(mem)
     //console.log(`dot: ${n} sp: ${stackPos}`)
   }
-  const compileXtWrapper = () => {
-    compileXt(popInt(inst.instance.exports, mem))
+  const typeFn = (strPtr, strLen) => {
+    const view8 = new Uint8Array(mem.buffer)
+    const str = Buffer.from(view8.slice(strPtr, strPtr + strLen)).toString('utf-8')
+    console.log(str)
   }
   const imports = { js: {
     mem,
     _writeStreamWord,
     '.': dot,
     postpone,
-    'compile,': compileXtWrapper,
-    "'": quoteXt
+    'compile,': compileXt,
+    "'": quoteXt,
+    type: typeFn
   } };
   inst = await WebAssembly.instantiate(binary, imports);
   return inst
@@ -799,6 +834,7 @@ function dictDataAddrLookup(mem, label) {
   }
   let entry = DICT_START + 4
   while (entry <= currentDict) {
+    const entryLen = buf[entry/4]
     const labelLen = buf[entry/4 + 2]
     const entryLabel = Buffer.from(buf8.slice(entry + 12, entry + 12 + labelLen)).toString('utf-8')
     if (entryLabel === label) {
@@ -813,6 +849,19 @@ function dictDataAddrLookup(mem, label) {
   return {}
 }
 
+function writeStringToDict(mem, str) {
+  const buf = new Int32Array(mem.buffer)
+  const buf8 = new Uint8Array(mem.buffer)
+  const strBytes = Buffer.from(str, 'utf-8')
+  const currentDict = buf[DICT_START/4]
+  for (let i = 0; i < strBytes.length; i++) {
+    buf8[currentDict + i] = strBytes[i]
+  }
+  buf8[currentDict + str.length] = 0
+  buf[DICT_START/4] = currentDict + str.length + 1
+  return currentDict
+}
+
 function xtId(def) {
   return def.fnId - nImportFunctions
 }
@@ -820,13 +869,81 @@ function xtIdToFnId(xtId) {
   return xtId + nImportFunctions
 }
 
+class TokenStream {
+  constructor(input) {
+    this.input = input;
+    this.pos = 0;
+  }
+
+  isEOF() {
+    return this.pos >= this.input.length;
+  }
+
+  peek() {
+    return this.pos < this.input.length ? this.input[this.pos] : null;
+  }
+
+  next() {
+    // yeet whitespace
+    while (this.pos < this.input.length && /\s/.test(this.peek())) {
+      this.pos++;
+    }
+
+    if (this.pos >= this.input.length) return null;
+
+    // string time
+    if (this.peek() === '"') {
+      return this.readString();
+    }
+
+    // word token grindset
+    return this.readWord();
+  }
+
+  readString() {
+    let str = '';
+    this.pos++; // yeet quote
+
+    while (this.pos < this.input.length) {
+      const c = this.input[this.pos++];
+
+      if (c === '\\') {
+        if (this.pos >= this.input.length) throw new Error('no cap finish ur escape');
+        const next = this.input[this.pos++];
+        str += next === 'n' ? '\n' :
+               next === 't' ? '\t' :
+               next === 'r' ? '\r' :
+               next === '"' ? '"' :
+               next === '\\' ? '\\' :
+               (() => { throw new Error(`fr what is \\${next}`) })();
+      } else if (c === '"') {
+        return { string: str };
+      } else {
+        str += c;
+      }
+    }
+
+    throw new Error('close ur string bestie');
+  }
+
+  readWord() {
+    let word = '';
+    while (this.pos < this.input.length && !/[\s"]/.test(this.peek())) {
+      word += this.input[this.pos++];
+    }
+    return word.length > 0 ? { word } : this.next();
+  }
+}
+
 // Turn forth source into webassembly wat
 async function runForth(source) {
-  const tokens = (runtime + source).split(/\s+/)
+  const tokens = runtime + source
   const defs = {}
   let curDef
   let doesDef
   let lastDef
+  let inlineImmDef
+  const getActiveDef = () => inlineImmDef || doesDef || curDef
   let fnId = Object.keys(primFuncs).length + nImportFunctions
   let wasmInstance
   const createLike = new Set(['create', "'"])
@@ -835,7 +952,7 @@ async function runForth(source) {
     maximum: 100
   })
   let variableN = 0
-  const tokStream = tokenStream(tokens)
+  const tokStream = new TokenStream(tokens)
   const lookupDefByFnId = id => {
     for (const k in defs) {
       if (defs[k].fnId === id) {
@@ -870,7 +987,7 @@ async function runForth(source) {
   }
   const compile = async () => {
     const postpone = async (type, fnId) => {
-      let activeDef = doesDef || curDef
+      let activeDef = getActiveDef()
       if (!activeDef) {
         throw new Error('postponing outside of compilation')
       }
@@ -894,7 +1011,7 @@ async function runForth(source) {
       await compileWord(activeDef, name, fnDef)
     }
     const compileXt = async xtId => {
-      let activeDef = doesDef || curDef
+      let activeDef = getActiveDef()
       if (!activeDef) {
         throw new Error('compileXt outside of compilation')
       }
@@ -905,16 +1022,19 @@ async function runForth(source) {
       await compileWord(activeDef, fnDef.name, fnDef)
     }
     const quoteXt = () => {
-      let activeDef = doesDef || curDef
+      let activeDef = getActiveDef()
       if (!activeDef) {
         throw new Error('compileXt outside of compilation')
       }
-      const name = tokStream.next()
+      const {word: name} = tokStream.next()
+      if (!name) {
+        throw new Error('Did not get a word after quote')
+      }
       const def = defs[name] ?? primFuncs[name]
       if (!def) {
         throw new Error('quote of unknown def ' + name)
       }
-      pushInt(wasmInstance.instance.exports, memory, xtId(def))
+      return xtId(def)
     }
     let oldExports = wasmInstance?.instance.exports
     wasmInstance = await compileDefs({
@@ -937,26 +1057,26 @@ async function runForth(source) {
     wasmInstance.instance.exports[curDef.name]()
     curDef = null
   }
-  while (!tokStream.eof()) {
+  while (!tokStream.isEOF()) {
     const tok = tokStream.next()
     if (!tok) {
       continue
     }
-    if (definitionKeyword[tok] && curDef?.topLevel) {
+    if (definitionKeyword[tok.word] && curDef?.topLevel) {
       await runTopLevel()
     }
-    if (tok === ':') {
+    if (tok.word === ':') {
       if (curDef) {
         throw new Error('cant start definition inside definition')
       }
-      const name = tokStream.next()
+      const {word: name} = tokStream.next()
       curDef = defs[name] = {
         name,
         words: [],
         fnId: fnId++,
         immediate: false
       }
-    } else if (tok === 'does>') {
+    } else if (tok.word === 'does>') {
       if (doesDef) {
         throw new Error('Repeated does>')
       }
@@ -967,7 +1087,7 @@ async function runForth(source) {
         fnId: fnId++,
         does: true
       }
-    } else if (tok === ';') {
+    } else if (tok.word === ';') {
       if (!doesDef && (!curDef || curDef.topLevel)) {
         throw new Error('unexpected ;')
       }
@@ -984,29 +1104,47 @@ async function runForth(source) {
       }
       lastDef = curDef
       curDef = null
-    } else if (tok === 'constant') {
+    } else if (tok.word === 'constant') {
       const n = popInt(wasmInstance.instance.exports, memory)
-      const name = tokStream.next()
+      const {word: name} = tokStream.next()
       defs[name] = {
         constant: n
       }
-    } else if (tok === 'immediate') {
+    } else if (tok.word === 'immediate') {
       if (!lastDef || curDef) {
         throw new Error('Unexpected use of immediate')
       }
       lastDef.immediate = true
-    } else if (tok === 'literal') {
+    } else if (tok.word === 'literal') {
       const n = popInt(wasmInstance.instance.exports, memory)
       curDef.words.push(n)
-    } else if (tok === 'postpone') {
-      const name = tokStream.next()
+    } else if (tok.word === 'postpone') {
+      const {word: name} = tokStream.next()
       curDef.words.push({postpone: name})
-    } else if (tok === ']]') {
-      for (let next = tokStream.next(); next !== '[['; next = tokStream.next()) {
-        curDef.words.push({postpone: next})
+    } else if (tok.word === '[[') {
+      // Start immediate mode
+      const name = ` _imm${fnId}`
+      inlineImmDef = defs[name] = {
+        name,
+        words: [],
+        fnId: fnId++,
+      }
+    } else if (tok.word === ']]') {
+      if (inlineImmDef) {
+        // Closing immediate in a non immediate word
+        const {name} = inlineImmDef
+        inlineImmDef = null
+        await compile()
+        wasmInstance.instance.exports[name]()
+        // Could delete this def now...
+      } else {
+        // Meant to be used in an immediate word
+        for (let {word: next} = tokStream.next(); next !== '[['; {word: next} = tokStream.next()) {
+          curDef.words.push({postpone: next})
+        }
       }
     } else {
-      let activeDef = doesDef || curDef
+      let activeDef = getActiveDef()
       if (!activeDef) {
         const name = ` _top${fnId}`
         activeDef = curDef = defs[name] = {
@@ -1017,25 +1155,28 @@ async function runForth(source) {
           immediate: false
         }
       }
-      if (isNumber(tok)) {
-        const n = parseNumber(tok)
+      if (tok.string) {
+        const addr = writeStringToDict(memory, tok.string)
+        activeDef.words.push(addr, tok.string.length)
+      } else if (isNumber(tok.word)) {
+        const n = parseNumber(tok.word)
         activeDef.words.push(n)
       } else {
-        const wordDef = defs[tok] ?? prims[tok]
+        const wordDef = defs[tok.word] ?? prims[tok.word]
         if (!wordDef) {
-          const {addr: dictAddr, doesId} = dictDataAddrLookup(memory, tok)
+          const {addr: dictAddr, doesId} = dictDataAddrLookup(memory, tok.word)
           if (dictAddr !== undefined) {
             activeDef.words.push(dictAddr)
             if (doesId) {
               activeDef.words.push(` _does${doesId}`)
             }
           } else {
-            throw new Error('unknown word ' + tok)
+            throw new Error('unknown word ' + tok.word)
           }
         } else if (wordDef.constant !== undefined) {
           activeDef.words.push(wordDef.constant)
         } else {
-          await compileWord(activeDef, tok, wordDef)
+          await compileWord(activeDef, tok.word, wordDef)
         }
       }
     }
