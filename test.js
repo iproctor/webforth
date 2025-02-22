@@ -191,7 +191,7 @@ async function test() {
     t.equal(popInt(e, m), 6, 'literal str')
   }
   {
-    const {memory: m, exports: e} = await runForth('')
+    const {memory: m, exports: e} = await runForth('"abcdef" dup v type')
     t.equal(popInt(e, m), 6, 'literal str')
   }
 }

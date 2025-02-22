@@ -131,7 +131,9 @@ const DICT_START = FSTACK_START + 4
 
 const floatStackIndex = 2
 
-function stackOps(globalIdx, opset = i32, cellsize=4) {
+function stackOps(args) {
+  args = {opset: i32, cellsize: 4, ...args}
+  const {globalIdx, opset, cellsize} = args
   const localOffset = globalIdx === floatStackIndex ? 2 : 0
   const readSp = wasm.global_get(globalIdx)
   const derefSp = offset => [
@@ -174,7 +176,6 @@ function stackOps(globalIdx, opset = i32, cellsize=4) {
     ret.push(...moveSp(n * cellsize))
     return ret
   }
-  const args = [globalIdx, opset, cellsize]
   const irPush = n => ({ir: 'push', stack: args, n})
   const irPop = n => ({ir: 'pop', stack: args, n})
   const mergePushPop = ({n: pushN}, {n: popN}) => {
@@ -222,9 +223,9 @@ function stackOps(globalIdx, opset = i32, cellsize=4) {
     mergePushPop
   }
 }
-const stack = stackOps(0)
-const rStack = stackOps(1)
-const fStack = stackOps(floatStackIndex, f64, 8)
+const stack = stackOps({globalIdx: 0})
+const rStack = stackOps({globalIdx: 1})
+const fStack = stackOps({globalIdx: floatStackIndex, opset: f64, cellsize: 8})
 function binPrim(op, stack, outStack) {
   return [
     stack.irPop(2),
@@ -707,7 +708,7 @@ function isPushPopPair(i1, i2) {
   if (typeof i1 !== 'object' || typeof i2 !== 'object') {
     return
   }
-  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack[0] === i2.stack[0] && i2.n - i1.n <= i1.stack[1].N_LOCALS
+  return i1.ir === 'push' && i2.ir === 'pop' && i1.stack.globalIdx === i2.stack.globalIdx && i2.n - i1.n <= i1.stack.opset.N_LOCALS
 }
 
 function optimize(code) {
@@ -717,13 +718,13 @@ function optimize(code) {
     const next = code[i+1]
     // TODO pop op push -> read op set
     if (isPushPopPair(cur, next)) {
-      const transfer = stackOps(...cur.stack).mergePushPop(cur, next)
+      const transfer = stackOps(cur.stack).mergePushPop(cur, next)
       code.splice(i, 2, ...transfer)
     } else if (typeof cur === 'object') {
       if (cur.ir === 'pop') {
-        code.splice(i, 1, ...stackOps(...cur.stack).popSp(cur.n))
+        code.splice(i, 1, ...stackOps(cur.stack).popSp(cur.n))
       } else if (cur.ir === 'push') {
-        code.splice(i, 1, ...stackOps(...cur.stack).pushSp(cur.n))
+        code.splice(i, 1, ...stackOps(cur.stack).pushSp(cur.n))
       }
     } else {
       i++
