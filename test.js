@@ -1,4 +1,4 @@
-const {runForth, popInt, STACK_START, DICT_START, printMem} = require('./compiler')
+const {runForth, popInt, popFloat, STACK_START, DICT_START, printMem} = require('./compiler')
 const t = require('tap')
 
 
@@ -191,8 +191,12 @@ async function test() {
     t.equal(popInt(e, m), 6, 'literal str')
   }
   {
-    const {memory: m, exports: e} = await runForth('"abcdef" dup v type')
-    t.equal(popInt(e, m), 6, 'literal str')
+    const {memory: m, exports: e} = await runForth('1.234')
+    t.equal(popFloat(e, m), 1.234, 'float literal')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('1.1 2.0 f*')
+    t.equal(popFloat(e, m), 2.2, 'float mult')
   }
 }
 test()

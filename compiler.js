@@ -68,7 +68,7 @@ const i32 = {
   N_LOCALS: 2
 }
 const f64 = {
-  const: n => [0x44, ...new Float64Array([n]).buffer], // Push f64 constant
+  const: n => [0x44, ...new Uint8Array(new Float64Array([n]).buffer)], // Push f64 constant
   add: [0xa0],    // f64.add
   sub: [0xa1],    // f64.sub
   mul: [0xa2],    // f64.mul
@@ -129,6 +129,7 @@ const RSTACK_START = STACK_START + RSTACK_SIZE
 const FSTACK_START = RSTACK_START + FSTACK_SIZE
 const DICT_START = FSTACK_START + 4
 
+const dataStackIndex = 0
 const floatStackIndex = 2
 
 function stackOps(args) {
@@ -223,9 +224,13 @@ function stackOps(args) {
     mergePushPop
   }
 }
-const stack = stackOps({globalIdx: 0})
+const stack = stackOps({globalIdx: dataStackIndex})
 const rStack = stackOps({globalIdx: 1})
 const fStack = stackOps({globalIdx: floatStackIndex, opset: f64, cellsize: 8})
+const stacks = {
+  [dataStackIndex]: stack,
+  [floatStackIndex]: fStack
+}
 function binPrim(op, stack, outStack) {
   return [
     stack.irPop(2),
@@ -246,6 +251,7 @@ const types = {
   void_to_void: {desc: [0x00, typeI++], pop: 0, push: 0},
   i32_to_i32: {desc: [0x00, typeI++], pop: 1, push: 1},
   i32_i32_to_void: {desc: [0x00, typeI++], pop: 2, push: 0},
+  f64_to_void: {desc: [0x00, typeI++], pop: 1, push: 0, opset: f64},
   i32_to_void: {desc: [0x00, typeI++], pop: 1, push: 0},
   void_to_i32: {desc: [0x00, typeI++], pop: 0, push: 1},
 }
@@ -254,7 +260,8 @@ const runtimeImports = [
   { module: 'js', name: 'mem', desc: [0x02, 0x00, 0x01]},
   { module: 'js', name: '_writeStreamWord', ...types.i32_to_i32},
   { module: 'js', name: '.', ...types.void_to_void},
-  { module: 'js', name: 'postpone', ...types.i32_i32_to_void},
+  { module: 'js', name: ' _postpone', internal: true, ...types.i32_i32_to_void},
+  { module: 'js', name: ' _postponeF', internal: true, ...types.f64_to_void},
   { module: 'js', name: 'compile,', ...types.i32_to_void},
   { module: 'js', name: "'", ...types.void_to_i32},
   { module: 'js', name: "type", ...types.i32_i32_to_void},
@@ -336,21 +343,21 @@ const pureOps = {
   dup: [[
     ...wasm.local_tee(0),
     ...wasm.local_get(0)
-  ], 1, 2],
+  ], dataStackIndex, 1, 2],
   swap: [[
     ...wasm.local_set(0),
     ...wasm.local_set(1),
     ...wasm.local_get(0),
     ...wasm.local_get(1),
-  ], 2, 2],
-  drop: [wasm.local_set(0), 1, 0],
+  ], dataStackIndex, 2, 2],
+  drop: [wasm.local_set(0), dataStackIndex, 1, 0],
   over: [[
     ...wasm.local_set(0),
     ...wasm.local_tee(1),
     ...wasm.local_get(0),
     ...wasm.local_get(1),
-  ], 2, 3],
-  '@': [i32.load(0), 1, 1],
+  ], dataStackIndex, 2, 3],
+  '@': [i32.load(0), dataStackIndex, 1, 1],
 }
 
 const primFuncOps = {
@@ -460,11 +467,11 @@ const primFuncOps = {
 }
 for (const k in i32BinOps) {
   primFuncOps[k] = binPrim(i32BinOps[k], stack)
-  pureOps[k] = [i32BinOps[k], 2, 1, false]
+  pureOps[k] = [i32BinOps[k], dataStackIndex, 2, 1]
 }
 for (const k in f64BinOps) {
   primFuncOps[k] = binPrim(f64BinOps[k], fStack)
-  //pureOps[k] = [f64BinOps[k], 2, 1, true]
+  pureOps[k] = [f64BinOps[k], floatStackIndex, 2, 1]
 }
 for (const k in f64ToI32BinOps) {
   primFuncOps[k] = binPrim(f64ToI32BinOps[k], fStack, stack)
@@ -472,11 +479,11 @@ for (const k in f64ToI32BinOps) {
 }
 for (const k in i32UnaryOps) {
   primFuncOps[k] = unPrim(i32UnaryOps[k], stack)
-  pureOps[k] = [i32UnaryOps[k], 1, 1, false]
+  pureOps[k] = [i32UnaryOps[k], dataStackIndex, 1, 1]
 }
 for (const k in f64UnaryOps) {
   primFuncOps[k] = unPrim(f64UnaryOps[k], fStack)
-  //pureOps[k] = [f64UnaryOps[k], 1, 1, true]
+  pureOps[k] = [f64UnaryOps[k], floatStackIndex, 1, 1]
 }
 for (const k in i32ToF64UnaryOps) {
   primFuncOps[k] = unPrim(i32ToF64UnaryOps[k], stack, fStack)
@@ -523,6 +530,10 @@ const importToIndex = {}
   for (const f of importFunctions) {
     const {pop = 0, push = 0, name} = f
     importToIndex[f.name] = i
+    if (f.internal) {
+      i++
+      continue
+    }
     const r = []
     if (pop > 0) {
       r.push(stack.irPop(pop))
@@ -531,7 +542,7 @@ const importToIndex = {}
     if (push > 0) {
       r.push(stack.irPush(push))
     }
-    pureOps[f.name] = [wasm.call(i), pop, push]
+    pureOps[f.name] = [wasm.call(i), dataStackIndex, pop, push]
     primFuncOps[f.name] = r
     i++
   }
@@ -576,6 +587,13 @@ function pushInt(exports, memory, n) {
   exports.sp.value = sp - 4
   view[sp/4] = n
 }
+function popFloat(exports, memory) {
+  const view = new Float64Array(memory.buffer)
+  const sp = exports.fsp.value + 8
+  const val = view[sp/8]
+  exports.sp.value = sp
+  return val
+}
 function popInt(exports, memory) {
   const view = new Int32Array(memory.buffer)
   const sp = exports.sp.value + 4
@@ -603,9 +621,9 @@ function buildBinaryModule(funcs) {
     ...Object.values(types).flatMap(type => [
       0x60,
       ...leb128(type.pop),
-      ...Array(type.pop).fill(0x7F),
+      ...Array(type.pop).fill((type.opset ?? i32).numtype),
       ...leb128(type.push),
-      ...Array(type.push).fill(0x7F),
+      ...Array(type.push).fill((type.opset ?? i32).numtype),
     ])
   ]);
 
@@ -733,9 +751,20 @@ function optimize(code) {
   return code
 }
 
-const isPure = word => typeof word === 'number' || (typeof word === 'string' && pureOps[word])
-const isNumber = word => word.match(/^-?\d+$/)
-const parseNumber = word => parseInt(word)
+const pureType = word => {
+  if (Number.isInteger(word)) {
+    return dataStackIndex
+  }
+  if (typeof word === 'number') {
+    return floatStackIndex
+  }
+  const pureOp = pureOps[word]
+  return pureOp?.[1]
+}
+const isNumber = word => word.match(/^-?\d*\.?\d+$/)
+const parseNumber = word => parseFloat(word)
+
+const numConst = num => Number.isInteger(num) ? i32.const(num) : f64.const(num)
 
 // Returns instance
 async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt}) {
@@ -760,18 +789,24 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     for (let i = 0; i < words.length; i++) {
       let word = words[i]
       p(word)
-      if (isPure(word)) {
+      const pType = pureType(word)
+      if (pType !== undefined) {
         const pureSeq = []
         let maxStackDepth = 0
         let curStackDepth = 0
 
         while (true) {
           p('pure', word)
+          const incomingPt = pureType(word)
+          if (incomingPt !== pType) {
+            i--
+            break
+          }
           if (typeof word === 'number') {
-            pureSeq.push(...i32.const(word))
+            pureSeq.push(...numConst(word))
             curStackDepth--
           } else {
-            const [code, popN, pushN] = pureOps[word]
+            const [code, , popN, pushN] = pureOps[word]
             pureSeq.push(...code)
             curStackDepth += popN
             if (curStackDepth > maxStackDepth) {
@@ -781,38 +816,44 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
           }
           i++
           word = words[i]
-          if (!isPure(word)) {
-            i--
-            break
-          }
         }
         const toCopy = maxStackDepth - curStackDepth
         if (maxStackDepth > 0) {
           p('pure pop', maxStackDepth)
-          code.push(stack.irPop(maxStackDepth))
+          code.push(stacks[pType].irPop(maxStackDepth))
         }
         code.push(...pureSeq)
         if (toCopy > 0) {
           p('pure push', toCopy)
-          code.push(stack.irPush(toCopy))
+          code.push(stacks[pType].irPush(toCopy))
         }
       } else if (typeof word === 'object') {
         if (word.postpone) {
-          let type = 0, id = 0
           if (isNumber(word.postpone)) {
-            id = parseNumber(word.postpone)
+            const n = parseFloat(word.postpone)
+            if (Number.isInteger(n)) {
+              code.push(
+                ...i32.const(0),
+                ...numConst(n),
+                ...wasm.call(importToIndex[' _postpone'])
+              )
+            } else {
+              code.push(
+                ...numConst(n),
+                ...wasm.call(importToIndex[' _postponeF'])
+              )
+            }
           } else {
-            type = 1
             id = primNonFuncIds[word.postpone] ?? funcs[word.postpone]?.fnId
             if (id === undefined) {
               throw new Error('Unknown postpone word: ' + word.postpone)
             }
+            code.push(
+              ...i32.const(1),
+              ...i32.const(id),
+              ...wasm.call(importToIndex[' _postpone'])
+            )
           }
-          code.push(
-            ...i32.const(type),
-            ...i32.const(id),
-            ...wasm.call(importToIndex.postpone)
-          )
         }
       } else {
         if (prims[word]) {
@@ -902,7 +943,8 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     mem,
     _writeStreamWord,
     '.': dot,
-    postpone,
+    ' _postpone': postpone,
+    ' _postponeF': f => postpone(0, f),
     'compile,': compileXt,
     "'": quoteXt,
     type: typeFn
@@ -1292,6 +1334,7 @@ async function runForth(source) {
 module.exports = {
   runForth,
   popInt,
+  popFloat,
   STACK_START,
   DICT_START,
   printMem
