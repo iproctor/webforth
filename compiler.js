@@ -127,7 +127,7 @@ const FSTACK_SIZE = 256
 const STACK_START = STACK_SIZE
 const RSTACK_START = STACK_START + RSTACK_SIZE
 const FSTACK_START = RSTACK_START + FSTACK_SIZE
-const DICT_START = FSTACK_START + 4
+const DICT_START = FSTACK_START + 8
 
 const dataStackIndex = 0
 const floatStackIndex = 2
@@ -336,7 +336,10 @@ const f64UnaryOps = {
   'fround': f64.nearest
 }
 const i32ToF64UnaryOps = {
-  's>f': f64.convert_i32_s
+  '>f': f64.convert_i32_s
+}
+const f64ToI32UnaryOps = {
+  'f>': i32.trunc_f64_s
 }
 
 const pureOps = {
@@ -358,7 +361,12 @@ const pureOps = {
     ...wasm.local_get(1),
   ], dataStackIndex, 2, 3],
   '@': [i32.load(0), dataStackIndex, 1, 1],
+  dict_start: [i32.const(DICT_START), dataStackIndex, 0, 1]
 }
+pureOps['!'] = [[
+  ...pureOps.swap[0],
+  ...i32.store(0)
+], dataStackIndex, 2, 0]
 
 const primFuncOps = {
   // ( n -- )
@@ -450,6 +458,16 @@ const primFuncOps = {
     ...i32.load(0),
     ...stack.writeNth(1),
   ],
+  'f@': [
+    ...stack.nth(1),
+    ...f64.load(0),
+    fStack.irPush(1)
+  ],
+  'f!': [
+    stack.irPop(1),
+    fStack.irPop(1),
+    ...f64.store(0),
+  ],
 
   // ( a -- )
   drop: stack.drop(1),
@@ -487,6 +505,10 @@ for (const k in f64UnaryOps) {
 }
 for (const k in i32ToF64UnaryOps) {
   primFuncOps[k] = unPrim(i32ToF64UnaryOps[k], stack, fStack)
+  //pureOps[k] = [f64UnaryOps[k], 1, 1, true]
+}
+for (const k in f64ToI32UnaryOps) {
+  primFuncOps[k] = unPrim(f64ToI32UnaryOps[k], fStack, stack)
   //pureOps[k] = [f64UnaryOps[k], 1, 1, true]
 }
 const controlInstructions = {
@@ -752,19 +774,20 @@ function optimize(code) {
 }
 
 const pureType = word => {
-  if (Number.isInteger(word)) {
-    return dataStackIndex
-  }
-  if (typeof word === 'number') {
-    return floatStackIndex
+  if (typeof word === 'object' && word.num !== undefined) {
+    if (word.float) {
+      return floatStackIndex
+    } else {
+      return dataStackIndex
+    }
   }
   const pureOp = pureOps[word]
   return pureOp?.[1]
 }
 const isNumber = word => word.match(/^-?\d*\.?\d+$/)
-const parseNumber = word => parseFloat(word)
+const parseNumber = word => ({num: parseFloat(word), float: word.includes('.')})
 
-const numConst = num => Number.isInteger(num) ? i32.const(num) : f64.const(num)
+const numConst = num => num.float ? f64.const(num.num) : i32.const(num.num)
 
 // Returns instance
 async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt}) {
@@ -802,7 +825,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
             i--
             break
           }
-          if (typeof word === 'number') {
+          if (typeof word === 'object' && word.num !== undefined) {
             pureSeq.push(...numConst(word))
             curStackDepth--
           } else {
@@ -830,17 +853,17 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
       } else if (typeof word === 'object') {
         if (word.postpone) {
           if (isNumber(word.postpone)) {
-            const n = parseFloat(word.postpone)
-            if (Number.isInteger(n)) {
+            const n = parseNumber(word.postpone)
+            if (n.float) {
+              code.push(
+                ...numConst(n),
+                ...wasm.call(importToIndex[' _postponeF'])
+              )
+            } else {
               code.push(
                 ...i32.const(0),
                 ...numConst(n),
                 ...wasm.call(importToIndex[' _postpone'])
-              )
-            } else {
-              code.push(
-                ...numConst(n),
-                ...wasm.call(importToIndex[' _postponeF'])
               )
             }
           } else {
@@ -849,11 +872,13 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
               throw new Error('Unknown postpone word: ' + word.postpone)
             }
             code.push(
-              ...i32.const(1),
+              ...i32.const(2),
               ...i32.const(id),
               ...wasm.call(importToIndex[' _postpone'])
             )
           }
+        } else if (word.num !== undefined) {
+          code.push(...numConst(word), (word.float ? fStack : stack).irPush(1))
         }
       } else {
         if (prims[word]) {
@@ -865,6 +890,9 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
           code.push(...wasm.call(importToIndex[word]))
         } else {
           const wordDef = defs[word]
+          if (!wordDef) {
+            throw new Error('Unknown word ' + JSON.stringify(word))
+          }
           if (wordDef.words.length < INLINE_THRESH) {
             p('inline', word)
             words.splice(i, 1, ...wordDef.words)
@@ -944,7 +972,7 @@ async function compileDefs({defs, mem, tokStream, postpone, compileXt, quoteXt})
     _writeStreamWord,
     '.': dot,
     ' _postpone': postpone,
-    ' _postponeF': f => postpone(0, f),
+    ' _postponeF': f => postpone(1, f),
     'compile,': compileXt,
     "'": quoteXt,
     type: typeFn
@@ -1133,8 +1161,8 @@ async function runForth(source) {
         throw new Error('postponing outside of compilation')
       }
       let name, fnDef = {}
-      if (type === 0) { // number
-        name = fnId
+      if (type === 0 || type === 1) { // number
+        name = {num: fnId, float: type === 1}
       } else if (fnId < 0) {
         for (const k in primNonFuncIds) {
           if (primNonFuncIds[k] === fnId) {
@@ -1235,7 +1263,7 @@ async function runForth(source) {
       if (doesDef) {
         // Gonna assume we are following a CREATE
         curDef.words.push(
-          doesDef.fnId,
+          {num: doesDef.fnId, float: false},
           '_dict_current_set_does'
         )
         doesDef = null
@@ -1249,7 +1277,7 @@ async function runForth(source) {
       const n = popInt(wasmInstance.instance.exports, memory)
       const {word: name} = tokStream.next()
       defs[name] = {
-        constant: n
+        constant: {num: n, float: false}
       }
     } else if (tok.word === 'immediate') {
       if (!lastDef || curDef) {
@@ -1258,7 +1286,7 @@ async function runForth(source) {
       lastDef.immediate = true
     } else if (tok.word === 'literal') {
       const n = popInt(wasmInstance.instance.exports, memory)
-      curDef.words.push(n)
+      curDef.words.push({num: n, float: false})
     } else if (tok.word === 'postpone') {
       const {word: name} = tokStream.next()
       curDef.words.push({postpone: name})
@@ -1298,7 +1326,10 @@ async function runForth(source) {
       }
       if (tok.string) {
         const addr = writeStringToDict(memory, tok.string)
-        activeDef.words.push(addr, tok.string.length)
+        activeDef.words.push(
+          {num: addr, float: false},
+          {num: tok.string.length, float: false}
+        )
       } else if (isNumber(tok.word)) {
         const n = parseNumber(tok.word)
         activeDef.words.push(n)
@@ -1307,7 +1338,7 @@ async function runForth(source) {
         if (!wordDef) {
           const {addr: dictAddr, doesId} = dictDataAddrLookup(memory, tok.word)
           if (dictAddr !== undefined) {
-            activeDef.words.push(dictAddr)
+            activeDef.words.push({num: dictAddr, float: false})
             if (doesId) {
               activeDef.words.push(` _does${doesId}`)
             }

@@ -31,6 +31,10 @@
   dup _dict_entry_end rot swap !
   dup @ 4 + swap ! ;
 
+: f, _dict_current
+  dup _dict_entry_end f!
+  dup @ 8 + swap ! ;
+
 : here _dict_current _dict_entry_end ;
 
 : allot _dict_current dup @ rot + swap ! ;

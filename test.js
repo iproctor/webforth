@@ -198,5 +198,17 @@ async function test() {
     const {memory: m, exports: e} = await runForth('1.1 2.0 f*')
     t.equal(popFloat(e, m), 2.2, 'float mult')
   }
+  {
+    const {memory: m, exports: e} = await runForth('1.234 ftrunc')
+    t.equal(popFloat(e, m), 1, 'float trunc')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('1.5 2 >f f* f>')
+    t.equal(popInt(e, m), 3, 'float conversion')
+  }
+  {
+    const {memory: m, exports: e} = await runForth('create myfloat 1.23 f, myfloat f@')
+    t.equal(popFloat(e, m), 1.23, 'float dict')
+  }
 }
 test()
